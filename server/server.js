@@ -3,6 +3,8 @@ import cors from "cors";
 import dotenv from "dotenv";
 
 import connectDB from "./config/db.js";
+import interviewRoutes from "./routes/interviewRoutes.js";
+import User from "./models/User.js";
 
 dotenv.config();
 
@@ -28,6 +30,36 @@ app.get("/api/health", (req, res) => {
     success: true,
     message: "Backend server is running",
   });
+});
+
+// Register API routes
+app.use("/api/interviews", interviewRoutes);
+
+app.post("/api/test-user", async (req, res) => {
+  try {
+    let user = await User.findOne({
+      email: "testuser@example.com",
+    });
+
+    if (!user) {
+      user = await User.create({
+        name: "Test User",
+        email: "testuser@example.com",
+        password: "temporary-password-123",
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Test user created or already exists",
+      userId: user._id,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
 });
 
 // Start server after connctng  to MongoDB
