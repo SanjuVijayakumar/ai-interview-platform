@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import connectDB from "./config/db.js";
 import interviewRoutes from "./routes/interviewRoutes.js";
 import User from "./models/User.js";
+import questionRoutes from "./routes/questionRoutes.js";
 
 dotenv.config();
 
@@ -34,6 +35,7 @@ app.get("/api/health", (req, res) => {
 
 // Register API routes
 app.use("/api/interviews", interviewRoutes);
+app.use("/api/questions", questionRoutes);
 
 app.post("/api/test-user", async (req, res) => {
   try {
