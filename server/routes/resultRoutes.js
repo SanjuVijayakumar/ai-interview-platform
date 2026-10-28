@@ -286,4 +286,42 @@ router.patch("/:id", async (req, res) => {
   }
 });
 
+
+// DELETE: Delete an interview result
+router.delete("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Validate Result ID
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid interview result ID",
+      });
+    }
+
+    // Find and delete the interview result
+    const result = await InterviewResult.findByIdAndDelete(id);
+
+    // Check whether the result exists
+    if (!result) {
+      return res.status(404).json({
+        success: false,
+        message: "Interview result not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Interview result deleted successfully",
+      resultId: result._id,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete interview result",
+    });
+  }
+});
+
 export default router;

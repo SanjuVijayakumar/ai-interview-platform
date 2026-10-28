@@ -8,6 +8,8 @@ import User from "./models/User.js";
 import questionRoutes from "./routes/questionRoutes.js";
 import resultRoutes from "./routes/resultRoutes.js";
 
+import authRoutes from "./routes/authRoutes.js";
+
 dotenv.config();
 
 const app = express();
@@ -35,6 +37,8 @@ app.get("/api/health", (req, res) => {
 });
 
 // Register API routes
+app.use("/api/auth", authRoutes);
+
 app.use("/api/interviews", interviewRoutes);
 app.use("/api/questions", questionRoutes);
 app.use("/api/results", resultRoutes);
