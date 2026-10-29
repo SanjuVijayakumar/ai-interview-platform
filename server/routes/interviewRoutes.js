@@ -1,30 +1,20 @@
 import express from "express";
 import mongoose from "mongoose";
 import Interview from "../models/Interview.js";
+import authMiddleware from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
 // POST: Create a new interview
-router.post("/", async (req, res) => {
+router.post("/", authMiddleware, async (req, res) => {
   try {
-    const {
-      user,
-      title,
-      category,
-      difficulty,
-    } = req.body;
+    const { title, category, difficulty } = req.body;
+    const user = req.user.userId;
 
-    if (!user || !title || !category || !difficulty) {
+    if ( !title || !category || !difficulty) {
       return res.status(400).json({
         success: false,
         message: "All fields are required",
-      });
-    }
-
-    if (!mongoose.isValidObjectId(user)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid user ID",
       });
     }
 
@@ -48,10 +38,12 @@ router.post("/", async (req, res) => {
   }
 });
 
-// Retrieve all interviews
-router.get("/", async (req, res) => {
+// Retrieve all interviews - authenticated user
+router.get("/", authMiddleware, async (req, res) => {
   try {
-    const interviews = await Interview.find().sort({ createdAt: -1 });
+    const interviews = await Interview.find({
+      user: req.user.userId,
+    }).sort({ createdAt: -1 });
 
     res.status(200).json({
       success: true,
