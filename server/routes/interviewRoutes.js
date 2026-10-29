@@ -166,30 +166,38 @@ router.delete("/:id", async (req, res) => {
 });
 
 // Retrieve one interview by ID
-router.get("/:id", async (req, res) => {
+router.get("/:id", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
+    // 1. Validate the interview ID
+    if (!mongoose.isValidObjectId(id)) { 
+      return res.status(400).json({ 
+        success: false, 
         message: "Invalid interview ID",
-      });
+      }); 
     }
 
-    const interview = await Interview.findById(id);
-
-    if (!interview) {
-      return res.status(404).json({
-        success: false,
-        message: "Interview not found",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      interview,
+    // 2. Find the interview owned by the authenticated user
+    const interview = await Interview.findOne({ 
+      _id: id, 
+      user: req.user.userId, 
     });
+
+    // 3. Check whether the interview exists and belongs to the user
+    if (!interview) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Interview not found", 
+      });
+    }
+
+    // 4. Return the interview
+    return res.status(200).json({ 
+      success: true, 
+      interview, 
+    });
+
   } catch (error) {
     res.status(500).json({
       success: false,
