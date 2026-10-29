@@ -58,12 +58,13 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
-// PATCH: Update an existing interview
-router.patch("/:id", async (req, res) => {
+
+// PATCH: Update an interview belonging to the authenticated user
+router.patch("/:id", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Validate the interview ID
+    // 1. Validate the interview ID
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
@@ -71,7 +72,7 @@ router.patch("/:id", async (req, res) => {
       });
     }
 
-    // Allow only specific fields to be updated
+    // 2. Allow only specific fields to be updated
     const allowedFields = [
       "title",
       "category",
@@ -87,7 +88,7 @@ router.patch("/:id", async (req, res) => {
       }
     }
 
-    // Check whether valid fields were provided
+    // 3. Check whether valid fields were provided
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({
         success: false,
@@ -95,9 +96,12 @@ router.patch("/:id", async (req, res) => {
       });
     }
 
-    // Update the interview in MongoDB
-    const interview = await Interview.findByIdAndUpdate(
-      id,
+    // 4. Update only an interview owned by the authenticated user
+    const interview = await Interview.findOneAndUpdate(
+      {
+        _id: id,
+        user: req.user.userId,
+      },
       { $set: updates },
       {
         new: true,
@@ -105,7 +109,7 @@ router.patch("/:id", async (req, res) => {
       }
     );
 
-    // Check whether the interview exists
+    // 5. Check whether the interview exists and belongs to the user
     if (!interview) {
       return res.status(404).json({
         success: false,
@@ -113,22 +117,22 @@ router.patch("/:id", async (req, res) => {
       });
     }
 
-    // Return the updated interview
-    res.status(200).json({
+    // 6. Return the updated interview
+    return res.status(200).json({
       success: true,
       message: "Interview updated successfully",
       interview,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to update interview",
     });
   }
 });
 
-// DELETE: Delete an interview by ID
-router.delete("/:id", async (req, res) => {
+// DELETE: Delete an interview belonging to the authenticated user
+router.delete("/:id", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -140,10 +144,13 @@ router.delete("/:id", async (req, res) => {
       });
     }
 
-    // 2. Find and delete the interview
-    const interview = await Interview.findByIdAndDelete(id);
+    // 2. Delete only an interview owned by the authenticated user
+    const interview = await Interview.findOneAndDelete({
+      _id: id,
+      user: req.user.userId,
+    });
 
-    // 3. Check whether the interview exists
+    // 3. Check whether the interview exists and belongs to the user
     if (!interview) {
       return res.status(404).json({
         success: false,
@@ -152,13 +159,13 @@ router.delete("/:id", async (req, res) => {
     }
 
     // 4. Return success response
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: "Interview deleted successfully",
       interview,
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to delete interview",
     });
