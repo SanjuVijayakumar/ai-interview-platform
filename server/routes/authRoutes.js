@@ -1,5 +1,5 @@
 import express from "express";
-import { loginUser, registerUser } from "../controllers/authController.js";
+import { loginUser, registerUser, updateUserProfile } from "../controllers/authController.js";
 import authMiddleware from "../middleware/authMiddleware.js";
 
 const router = express.Router();
@@ -17,6 +17,8 @@ router.get("/profile", authMiddleware, (req, res) => {
     message: "Access granted to protected route",
     user: req.user,
   });
-})
+});
+
+router.patch("/profile", authMiddleware, updateUserProfile);
 
 export default router;
