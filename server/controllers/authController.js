@@ -157,3 +157,118 @@ export const loginUser = async (req, res) => {
     });
   }
 };
+
+// Update authenticated user's profile
+export const updateUserProfile = async (req, res) => {
+  try {
+    const { name, skills, experience, targetRole } = req.body;
+
+    // to find the authenticated user
+    const user = await User.findById(req.user.userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Check whether at least one field is provided
+    if (
+      name === undefined &&
+      skills === undefined &&
+      experience === undefined &&
+      targetRole === undefined
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "At least one profile field is required",
+      });
+    }
+
+    // Validate name
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Name must be a non-empty string",
+        });
+      }
+
+      user.name = name.trim();
+    }
+
+    // Validate skills
+    if (skills !== undefined) {
+      if (
+        !Array.isArray(skills) ||
+        !skills.every(
+          (skill) => typeof skill === "string" && skill.trim()
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Skills must be an array of non-empty strings",
+        });
+      }
+
+      user.skills = skills.map((skill) => skill.trim());
+    }
+
+    // Validate experience
+    if (experience !== undefined) {
+      if (
+        typeof experience !== "number" ||
+        !Number.isFinite(experience) ||
+        experience < 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Experience must be a valid non-negative number",
+        });
+      }
+
+      user.experience = experience;
+    }
+
+    // Validate target role
+    if (targetRole !== undefined) {
+      if (
+        typeof targetRole !== "string" ||
+        !targetRole.trim()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Target role must be a non-empty string",
+        });
+      }
+
+      user.targetRole = targetRole.trim();
+    }
+
+    // Save updated profile
+    await user.save();
+
+    // Return safe user information
+    return res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        skills: user.skills,
+        experience: user.experience,
+        targetRole: user.targetRole,
+      },
+    });
+  } catch (error) {
+    console.error("Profile update error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error while updating profile",
+    });
+  }
+};
