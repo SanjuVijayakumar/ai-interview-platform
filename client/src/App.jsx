@@ -1,26 +1,32 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
+import LoginPage from "./pages/LoginPage.jsx";
+import ProfilePage from "./pages/ProfilePage.jsx";
+import { getAuthToken, logoutUser } from "./services/authService.js";
+import "./App.css";
 
 function App() {
-  const [message, setMessage] = useState("Connecting to backend...");
+  const [healthMessage, setHealthMessage] = useState("Checking backend status...");
+  const [token, setToken] = useState(() => getAuthToken());
 
   useEffect(() => {
     fetch("http://localhost:5000/api/health")
       .then((response) => response.json())
-      .then((data) => {
-        setMessage(data.message);
-      })
+      .then((data) => setHealthMessage(data.message || "Backend is available"))
       .catch((error) => {
-        console.error("Backend connection failed:", error);
-        setMessage("Failed to connect to backend");
+        console.error("Backend health check failed:", error);
+        setHealthMessage("Could not reach backend");
       });
   }, []);
 
-  return (
-    <div>
-      <h1>AI Interview Preparation Platform</h1>
-      <p>{message}</p>
-    </div>
-  );
+  const handleLogin = () => setToken(getAuthToken());
+  const handleLogout = () => {
+    logoutUser();
+    setToken(null);
+  };
+
+  return token
+    ? <ProfilePage healthMessage={healthMessage} onLogout={handleLogout} />
+    : <LoginPage healthMessage={healthMessage} onLogin={handleLogin} />;
 }
 
 export default App;
