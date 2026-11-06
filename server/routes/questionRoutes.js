@@ -2,8 +2,12 @@ import express from "express";
 import mongoose from "mongoose";
 import Question from "../models/Question.js";
 import Interview from "../models/Interview.js";
+import authMiddleware from "../middleware/authMiddleware.js";
 
 const router = express.Router();
+
+// Require authentication for every question endpoint.
+router.use(authMiddleware);
 
 // POST: Create a new question
 router.post("/", async (req, res) => {
@@ -36,7 +40,10 @@ router.post("/", async (req, res) => {
     }
 
     // check whether the interview exists
-    const existingInterview = await Interview.findById(interview);
+    const existingInterview = await Interview.findOne({
+      _id: interview,
+      user: req.user.userId,
+    });
 
     if (!existingInterview) {
       return res.status(404).json({
@@ -90,7 +97,10 @@ router.get("/:interviewId", async (req, res) => {
     }
 
     // Check whether the interview exists
-    const existingInterview = await Interview.findById(interviewId);
+    const existingInterview = await Interview.findOne({
+      _id: interviewId,
+      user: req.user.userId,
+    });
 
     if (!existingInterview) {
       return res.status(404).json({
@@ -178,7 +188,29 @@ router.patch("/:id", async (req, res) => {
       });
     }
 
-    // Update the question
+    // Check that the question exists and its interview belongs to this user.
+    const existingQuestion = await Question.findById(id);
+
+    if (!existingQuestion) {
+      return res.status(404).json({
+        success: false,
+        message: "Question not found",
+      });
+    }
+
+    const existingInterview = await Interview.findOne({
+      _id: existingQuestion.interview,
+      user: req.user.userId,
+    });
+
+    if (!existingInterview) {
+      return res.status(404).json({
+        success: false,
+        message: "Question not found",
+      });
+    }
+
+    // Update the question after confirming ownership.
     const question = await Question.findByIdAndUpdate(
       id,
       { $set: updates },
@@ -230,16 +262,29 @@ router.delete("/:id", async (req, res) => {
       });
     }
 
-    // Find and delete the question
-    const question = await Question.findByIdAndDelete(id);
+    // Find the question, then confirm its interview belongs to this user.
+    const existingQuestion = await Question.findById(id);
 
-    // Check whether the question exists
-    if (!question) {
+    if (!existingQuestion) {
       return res.status(404).json({
         success: false,
         message: "Question not found",
       });
     }
+
+    const existingInterview = await Interview.findOne({
+      _id: existingQuestion.interview,
+      user: req.user.userId,
+    });
+
+    if (!existingInterview) {
+      return res.status(404).json({
+        success: false,
+        message: "Question not found",
+      });
+    }
+
+    const question = await Question.findByIdAndDelete(id);
 
     res.status(200).json({
       success: true,
