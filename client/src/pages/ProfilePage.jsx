@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
+import { getAuthToken } from "../services/authService.js";
 import "../App.css";
 
 const PROFILE_URL = "http://localhost:5000/api/auth/profile";
-const TOKEN_STORAGE_KEY = "token";
-
 function profileFromApi(user) {
   return {
     name: user.name ?? "",
@@ -14,16 +13,28 @@ function profileFromApi(user) {
   };
 }
 
+function errorMessageFromApi(data) {
+  if (Array.isArray(data.errors)) {
+    return data.errors.map((error) => error.message || error.msg || String(error)).join(" ");
+  }
+  if (data.errors && typeof data.errors === "object") {
+    return Object.values(data.errors).flat().map((error) => typeof error === "string" ? error : error.message || error.msg || "").filter(Boolean).join(" ");
+  }
+  return data.message || data.error || "We couldn’t save your profile. Please check your details and try again.";
+}
+
 function ProfilePage({ healthMessage, onLogout }) {
   const [profile, setProfile] = useState(null);
+  const [savedProfile, setSavedProfile] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState({ type: "", text: "" });
 
   useEffect(() => {
     let cancelled = false;
 
     const loadProfile = async () => {
-      const token = window.localStorage.getItem(TOKEN_STORAGE_KEY);
+      const token = getAuthToken();
       if (!token) {
         setNotice({ type: "error", text: "You’re not signed in. Log in, then return here to view your profile." });
         setLoading(false);
@@ -45,7 +56,9 @@ function ProfilePage({ healthMessage, onLogout }) {
 
         if (!data.user) throw new Error("The profile response did not include user details.");
         if (!cancelled) {
-          setProfile(profileFromApi(data.user));
+          const loadedProfile = profileFromApi(data.user);
+          setProfile(loadedProfile);
+          setSavedProfile(loadedProfile);
           setNotice({ type: "", text: "" });
         }
       } catch (error) {
@@ -60,6 +73,65 @@ function ProfilePage({ healthMessage, onLogout }) {
     loadProfile();
     return () => { cancelled = true; };
   }, []);
+
+  const updateField = (field) => (event) => {
+    setProfile((current) => ({ ...current, [field]: event.target.value }));
+    setNotice({ type: "", text: "" });
+  };
+
+  const cancelChanges = () => {
+    setProfile(savedProfile);
+    setNotice({ type: "", text: "" });
+  };
+
+  const saveChanges = async (event) => {
+    event.preventDefault();
+    if (saving) return;
+
+    const token = getAuthToken();
+    if (!token) {
+      setNotice({ type: "error", text: "Your session has ended. Please log in again to update your profile." });
+      onLogout?.();
+      return;
+    }
+
+    const skills = profile.skills.split(",").map((skill) => skill.trim()).filter(Boolean);
+    const experience = Number(profile.experience);
+    if (profile.experience.trim() === "" || !Number.isFinite(experience) || experience < 0) {
+      setNotice({ type: "error", text: "Enter a valid, non-negative number of years for experience." });
+      return;
+    }
+
+    setSaving(true);
+    setNotice({ type: "", text: "" });
+    try {
+      const response = await fetch(PROFILE_URL, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name: profile.name.trim(), skills, experience, targetRole: profile.targetRole.trim() }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        setNotice({ type: "error", text: data.message || "Your session has expired. Please log in again." });
+        onLogout?.();
+        return;
+      }
+      if (!response.ok) throw new Error(errorMessageFromApi(data));
+
+      const updatedUser = data.user || data.profile || data;
+      if (!updatedUser || typeof updatedUser !== "object" || !("name" in updatedUser)) {
+        throw new Error("Your profile was saved, but the server response did not include updated profile details.");
+      }
+      const updatedProfile = profileFromApi(updatedUser);
+      setProfile(updatedProfile);
+      setSavedProfile(updatedProfile);
+      setNotice({ type: "success", text: data.message || "Your profile has been updated successfully." });
+    } catch (error) {
+      setNotice({ type: "error", text: error.message || "We couldn’t save your profile. Please try again." });
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const initials = profile?.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "U";
 
@@ -115,13 +187,14 @@ function ProfilePage({ healthMessage, onLogout }) {
 
             {loading ? (
               <div className="profile-loading" role="status"><span className="loading-spinner" />Loading your profile from your account…</div>
-            ) : notice.text ? (
-              <p className={`form-notice notice-${notice.type}`} role="alert">{notice.text}</p>
+            ) : !profile ? (
+              <p className={`form-notice notice-${notice.type || "error"}`} role="alert">{notice.text || "Your profile could not be loaded."}</p>
             ) : (
+              <form onSubmit={saveChanges}>
               <div className="form-grid">
                 <div className="field">
                   <label htmlFor="name">Full name</label>
-                  <input id="name" type="text" autoComplete="name" value={profile.name} readOnly />
+                  <input id="name" type="text" autoComplete="name" value={profile.name} onChange={updateField("name")} required />
                 </div>
                 <div className="field">
                   <label htmlFor="email">Email address <span className="label-note">(read-only)</span></label>
@@ -133,21 +206,29 @@ function ProfilePage({ healthMessage, onLogout }) {
                 </div>
                 <div className="field field-wide">
                   <label htmlFor="skills">Skills</label>
-                  <input id="skills" type="text" value={profile.skills} readOnly />
-                  <span className="field-help">Skills from your profile.</span>
+                  <input id="skills" type="text" value={profile.skills} onChange={updateField("skills")} placeholder="e.g. React, Node.js, MongoDB" />
+                  <span className="field-help">Separate skills with commas.</span>
                 </div>
                 <div className="field">
                   <label htmlFor="experience">Experience</label>
                   <div className="input-suffix">
-                    <input id="experience" type="number" value={profile.experience} readOnly />
+                    <input id="experience" type="number" min="0" step="any" value={profile.experience} onChange={updateField("experience")} required />
                     <span>years</span>
                   </div>
                 </div>
                 <div className="field">
                   <label htmlFor="targetRole">Target role</label>
-                  <input id="targetRole" type="text" value={profile.targetRole} readOnly />
+                  <input id="targetRole" type="text" value={profile.targetRole} onChange={updateField("targetRole")} />
                 </div>
               </div>
+              <div className="form-actions">
+                <button className="button button-secondary" type="button" onClick={cancelChanges} disabled={saving}>Cancel</button>
+                <button className="button button-primary" type="submit" disabled={saving}>
+                  {saving && <span className="button-spinner" aria-hidden="true" />}{saving ? "Saving…" : "Save Changes"}
+                </button>
+              </div>
+              {notice.text && <p className={`form-notice notice-${notice.type}`} role={notice.type === "error" ? "alert" : "status"}>{notice.text}</p>}
+              </form>
             )}
           </div>
         </section>
