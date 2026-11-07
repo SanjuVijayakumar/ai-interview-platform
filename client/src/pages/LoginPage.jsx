@@ -1,6 +1,11 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { gsap } from "gsap";
+import { ScrambleTextPlugin } from "gsap/ScrambleTextPlugin";
 import { loginUser } from "../services/authService.js";
 import "../App.css";
+import leftImage from "../assets/login-left.jpg";
+
+gsap.registerPlugin(ScrambleTextPlugin);
 
 function LoginPage({ onLogin, healthMessage }) {
   const [email, setEmail] = useState("");
@@ -8,6 +13,22 @@ function LoginPage({ onLogin, healthMessage }) {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const promoRef = useRef(null);
+
+  useEffect(() => {
+    const context = gsap.context(() => {
+      const lines = gsap.utils.toArray(".login-promo-line");
+      gsap.from(".login-promo-copy", { opacity: 0, y: 18, duration: 0.6, ease: "power2.out" });
+      gsap.to(lines, {
+        duration: 1.15,
+        stagger: 0.28,
+        ease: "none",
+        scrambleText: { chars: "upperCase", speed: 0.65 },
+      });
+    }, promoRef);
+
+    return () => context.revert();
+  }, []);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -42,7 +63,27 @@ function LoginPage({ onLogin, healthMessage }) {
         </div>
       </header>
 
-      <div className="login-content" id="login">
+      <div className="login-stage">
+        <section className="login-left-panel" aria-label="Prepare for your next interview">
+          <div className="login-image-panel" aria-hidden="true">
+            <img className="login-background-image" src={leftImage} alt="" />
+          </div>
+          <div className="login-image-overlay" aria-hidden="true" />
+          <div className="login-promo" ref={promoRef}>
+            <div className="login-promo-copy">
+              <p className="eyebrow">YOUR NEXT CHAPTER STARTS HERE</p>
+              <h2 className="login-promo-title">
+                <span className="login-promo-line">Prepare Smarter.</span>
+                <span className="login-promo-line">Practice Better.</span>
+                <span className="login-promo-line">Get Interview Ready.</span>
+              </h2>
+              <p className="login-promo-description">Build confidence with focused practice and AI-powered interview preparation.</p>
+            </div>
+          </div>
+        </section>
+
+        <section className="login-form-panel" aria-label="Sign in">
+          <div className="login-content" id="login">
         <section className="login-card" aria-labelledby="login-title">
           <div className="login-heading">
             <p className="eyebrow">WELCOME BACK</p>
@@ -100,6 +141,8 @@ function LoginPage({ onLogin, healthMessage }) {
         </section>
 
         <footer className="page-footer login-footer"><span>PREPARED FOR WHAT’S NEXT</span></footer>
+          </div>
+        </section>
       </div>
     </main>
   );
