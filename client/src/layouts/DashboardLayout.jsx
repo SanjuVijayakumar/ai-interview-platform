@@ -12,7 +12,7 @@ function DashboardLayout({
   onNotificationsClick,
 }) {
   return (
-    <div className="flex min-h-screen bg-slate-50 font-sans text-slate-800">
+    <div className="theme-app-shell flex min-h-screen font-sans">
       <Sidebar onLogout={onLogout} />
 
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">

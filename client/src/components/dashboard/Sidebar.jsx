@@ -37,17 +37,17 @@ const navigationItems = [
 
 function Sidebar({ onLogout }) {
   return (
-    <aside className="flex h-screen w-20 shrink-0 flex-col border-r border-slate-200 bg-white px-3 py-6 shadow-sm sm:w-64 sm:px-5">
+    <aside className="theme-sidebar flex h-screen w-20 shrink-0 flex-col border-r px-3 py-6 shadow-sm sm:w-64 sm:px-5">
       <NavLink
         to="/dashboard"
         aria-label="PrepX dashboard"
         className="mb-10 flex items-center justify-center gap-3 rounded-xl px-1 py-2 sm:justify-start sm:px-2"
       >
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-lg font-bold text-white shadow-sm shadow-indigo-200">
+        <span className="theme-logo-mark flex h-10 w-10 shrink-0 items-center justify-center rounded-xl theme-primary-button text-lg font-bold theme-text-primary shadow-sm theme-shadow-green">
           P
         </span>
-        <span className="hidden text-xl font-bold tracking-tight text-slate-900 sm:inline">
-          Prep<span className="text-indigo-600">X</span>
+        <span className="hidden text-xl font-bold tracking-tight theme-text-primary sm:inline">
+          Prep<span className="theme-text-accent">X</span>
         </span>
       </NavLink>
 
@@ -60,8 +60,8 @@ function Sidebar({ onLogout }) {
             className={({ isActive }) =>
               `group flex items-center justify-center gap-3 rounded-xl px-3 py-3 text-sm font-medium transition-colors duration-200 sm:justify-start ${
                 isActive
-                  ? "bg-indigo-50 text-indigo-700"
-                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                  ? "theme-sidebar-active"
+                  : "theme-sidebar-link"
               }`
             }
           >
@@ -86,7 +86,7 @@ function Sidebar({ onLogout }) {
         type="button"
         onClick={onLogout}
         title="Log out"
-        className="flex items-center justify-center gap-3 rounded-xl px-3 py-3 text-sm font-medium text-slate-600 transition-colors duration-200 hover:bg-rose-50 hover:text-rose-700 sm:justify-start"
+        className="theme-sidebar-logout flex items-center justify-center gap-3 rounded-xl px-3 py-3 text-sm font-medium transition-colors duration-200 sm:justify-start"
       >
         <svg
           aria-hidden="true"
