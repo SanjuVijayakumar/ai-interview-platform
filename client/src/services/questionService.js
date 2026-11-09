@@ -1,14 +1,15 @@
 import { getAuthToken } from "./authService.js";
 
 const API_URL = "http://localhost:5000/api/questions";
+const INTERVIEW_API_URL = "http://localhost:5000/api/interviews";
 
-async function request(path = "", options = {}) {
+async function request(path = "", options = {}, baseUrl = API_URL) {
   const token = getAuthToken();
   if (!token) throw new Error("Your session is missing. Please sign in again.");
 
   let response;
   try {
-    response = await fetch(`${API_URL}${path}`, {
+    response = await fetch(`${baseUrl}${path}`, {
       ...options,
       headers: {
         Authorization: `Bearer ${token}`,
@@ -21,7 +22,11 @@ async function request(path = "", options = {}) {
   }
 
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.message || "The question request could not be completed.");
+  if (!response.ok) {
+    const error = new Error(data.message || "The question request could not be completed.");
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -46,4 +51,16 @@ export async function updateQuestion(questionId, questionData) {
 
 export async function deleteQuestion(questionId) {
   return request(`/${encodeURIComponent(questionId)}`, { method: "DELETE" });
+}
+
+export async function generateInterviewQuestions(interviewId, preferences) {
+  const data = await request(
+    `/${encodeURIComponent(interviewId)}/generate-questions`,
+    { method: "POST", body: JSON.stringify(preferences) },
+    INTERVIEW_API_URL
+  );
+  if (!Array.isArray(data.questions)) {
+    throw new Error("The generated questions response was not in the expected format.");
+  }
+  return data.questions;
 }

@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { getInterviewById } from "../services/interviewService.js";
-import { createQuestion, deleteQuestion, getQuestions, updateQuestion } from "../services/questionService.js";
+import { createQuestion, deleteQuestion, generateInterviewQuestions, getQuestions, updateQuestion } from "../services/questionService.js";
 
 const blankQuestionForm = { questionText: "", category: "", difficulty: "Beginner", order: "1", expectedAnswer: "" };
 const difficulties = ["Beginner", "Intermediate", "Advanced"];
@@ -47,6 +47,16 @@ function InterviewDetailsPage() {
   const [notice, setNotice] = useState("");
   const [actionError, setActionError] = useState("");
   const [deletingQuestionId, setDeletingQuestionId] = useState("");
+  const [generationCount, setGenerationCount] = useState("5");
+  const [generationDifficulty, setGenerationDifficulty] = useState("");
+  const [generationCategory, setGenerationCategory] = useState("Technical");
+  const [customCategory, setCustomCategory] = useState("");
+  const [generatingQuestions, setGeneratingQuestions] = useState(false);
+  const [generationError, setGenerationError] = useState("");
+  const [generatedQuestions, setGeneratedQuestions] = useState([]);
+  const [selectedGeneratedQuestions, setSelectedGeneratedQuestions] = useState(() => new Set());
+  const generationInProgress = useRef(false);
+  const generationRequestId = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -117,6 +127,19 @@ function InterviewDetailsPage() {
   }, [interviewId, navigate]);
 
   const sortedQuestions = [...questions].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const selectedDifficulty = generationDifficulty || interview?.difficulty || "Intermediate";
+  const allGeneratedQuestionsSelected = generatedQuestions.length > 0 &&
+    selectedGeneratedQuestions.size === generatedQuestions.length;
+
+  useEffect(() => {
+    generationRequestId.current += 1;
+    generationInProgress.current = false;
+    setGeneratingQuestions(false);
+    setGeneratedQuestions([]);
+    setSelectedGeneratedQuestions(new Set());
+    setGenerationError("");
+    setGenerationDifficulty("");
+  }, [interviewId]);
 
   const openQuestionModal = () => {
     setEditingQuestion(null);
@@ -247,6 +270,66 @@ function InterviewDetailsPage() {
     }
   };
 
+  const handleGenerateQuestions = async () => {
+    if (generationInProgress.current) return;
+
+    const count = Number(generationCount);
+    if (!Number.isInteger(count) || count < 1 || count > 10) {
+      setGenerationError("Choose a whole number of questions from 1 to 10.");
+      return;
+    }
+    if (!difficulties.includes(selectedDifficulty)) {
+      setGenerationError("Choose a valid difficulty.");
+      return;
+    }
+
+    const category = generationCategory === "Custom" ? customCategory.trim() : generationCategory;
+    if (!category || category.length > 60) {
+      setGenerationError("Enter a custom category with 1 to 60 characters.");
+      return;
+    }
+
+    generationInProgress.current = true;
+    const requestId = ++generationRequestId.current;
+    setGeneratingQuestions(true);
+    setGenerationError("");
+    try {
+      const result = await generateInterviewQuestions(interviewId, {
+        count,
+        difficulty: selectedDifficulty,
+        category,
+      });
+      if (requestId !== generationRequestId.current) return;
+      const validResult = result.length === count && result.every((question) =>
+        question &&
+        typeof question.questionText === "string" && question.questionText.trim() &&
+        typeof question.category === "string" && question.category.trim() &&
+        difficulties.includes(question.difficulty) &&
+        typeof question.expectedAnswer === "string" && question.expectedAnswer.trim()
+      );
+      if (!validResult) {
+        throw new Error("The generated questions were incomplete. Please try again.");
+      }
+
+      setGeneratedQuestions(result);
+      setSelectedGeneratedQuestions(new Set());
+    } catch (requestError) {
+      if (requestId !== generationRequestId.current) return;
+      const message = requestError.message || "Unable to generate questions. Please try again.";
+      if (requestError.status === 401 || /session is missing|authentication token/i.test(message)) {
+        setGenerationError("Your session has expired. Please sign in again.");
+        navigate("/login", { replace: true });
+        return;
+      }
+      setGenerationError(message);
+    } finally {
+      if (requestId === generationRequestId.current) {
+        generationInProgress.current = false;
+        setGeneratingQuestions(false);
+      }
+    }
+  };
+
   return (
     <div className="space-y-6 sm:space-y-8">
       <section className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
@@ -287,6 +370,179 @@ function InterviewDetailsPage() {
         </dl>
       </section>
       ) : null}
+
+      <section className="relative overflow-hidden rounded-2xl border theme-border-highlight theme-card-surface p-5 shadow-sm sm:p-6" aria-labelledby="ai-generator-heading">
+        <div aria-hidden="true" className="pointer-events-none absolute -right-12 -top-16 h-44 w-44 rounded-full bg-emerald-400/10 blur-3xl" />
+        <div className="relative">
+          <div className="mb-6 flex flex-col gap-4 border-b theme-border-subtle pb-5 sm:flex-row sm:items-center">
+            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl theme-accent-soft-surface theme-text-accent ring-1 ring-emerald-400/20">
+              <svg aria-hidden="true" className="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3v2m0 14v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M3 12h2m14 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42" />
+                <circle cx="12" cy="12" r="4" />
+              </svg>
+            </span>
+            <div className="min-w-0">
+              <p className="mb-1 text-xs font-bold uppercase tracking-[0.15em] theme-text-accent">PERSONALIZED PRACTICE</p>
+              <h3 id="ai-generator-heading" className="mb-1 font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">AI Question Generator</h3>
+              <p className="mb-0 text-sm leading-6 theme-text-secondary">Generate personalized interview questions based on your skills, experience and target role.</p>
+            </div>
+          </div>
+
+          <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <label className="block min-w-0">
+              <span className="mb-1.5 block text-sm font-semibold theme-text-primary">Number of Questions</span>
+              <input
+                type="number"
+                min="1"
+                max="10"
+                step="1"
+                value={generationCount}
+                onChange={(event) => setGenerationCount(event.target.value)}
+                className="h-11 w-full min-w-0 rounded-xl border theme-border px-3 text-sm outline-none transition theme-input-focus focus:ring-2"
+              />
+              <span className="mt-1.5 block text-xs theme-text-muted">Choose between 1 and 10 questions.</span>
+            </label>
+
+            <label className="block min-w-0">
+              <span className="mb-1.5 block text-sm font-semibold theme-text-primary">Difficulty</span>
+              <select
+                value={selectedDifficulty}
+                onChange={(event) => setGenerationDifficulty(event.target.value)}
+                className="h-11 w-full min-w-0 rounded-xl border theme-border px-3 text-sm outline-none transition theme-input-focus focus:ring-2"
+              >
+                {difficulties.map((difficulty) => <option key={difficulty} value={difficulty}>{difficulty}</option>)}
+              </select>
+              <span className="mt-1.5 block text-xs theme-text-muted">Starts with this interview’s difficulty.</span>
+            </label>
+
+            <div className="min-w-0 sm:col-span-2 xl:col-span-1">
+              <label className="block min-w-0">
+                <span className="mb-1.5 block text-sm font-semibold theme-text-primary">Question Category</span>
+                <select
+                  value={generationCategory}
+                  onChange={(event) => setGenerationCategory(event.target.value)}
+                  className="h-11 w-full min-w-0 rounded-xl border theme-border px-3 text-sm outline-none transition theme-input-focus focus:ring-2"
+                >
+                  <option value="Technical">Technical</option>
+                  <option value="Behavioral">Behavioral</option>
+                  <option value="Problem Solving">Problem Solving</option>
+                  <option value="Scenario Based">Scenario Based</option>
+                  <option value="Custom">Custom</option>
+                </select>
+              </label>
+              {generationCategory === "Custom" && (
+                <label className="mt-3 block min-w-0">
+                  <span className="sr-only">Custom question category</span>
+                  <input
+                    type="text"
+                    value={customCategory}
+                    onChange={(event) => setCustomCategory(event.target.value)}
+                    maxLength={60}
+                    placeholder="Enter a category (up to 60 characters)"
+                    className="h-11 w-full min-w-0 rounded-xl border theme-border px-3 text-sm outline-none transition placeholder:theme-text-muted theme-input-focus focus:ring-2"
+                  />
+                </label>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-6 flex flex-col gap-3 border-t theme-border-subtle pt-5 sm:flex-row sm:items-center sm:justify-between">
+            <p className="mb-0 max-w-xl text-xs leading-5 theme-text-muted">Questions will be tailored to this interview and your candidate profile.</p>
+            <button type="button" onClick={handleGenerateQuestions} disabled={generatingQuestions} className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold shadow-sm theme-shadow-green transition hover:-translate-y-0.5 theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70 sm:w-auto">
+              {generatingQuestions ? (
+                <><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />Generating...</>
+              ) : (
+                <><svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3 1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2L12 3Z" /><path d="m19 15 .9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15Z" /></svg>Generate Questions with AI</>
+              )}
+            </button>
+          </div>
+          {generationError && <p className="mb-0 mt-4 rounded-xl border theme-border-error theme-error-surface px-4 py-3 text-sm theme-text-error" role="alert">{generationError}</p>}
+        </div>
+      </section>
+
+      <section className="overflow-hidden rounded-2xl border theme-border theme-card-surface shadow-sm" aria-labelledby="generated-preview-heading">
+        <div className="flex flex-col gap-4 border-b theme-border-subtle px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          <div>
+            <p className="mb-1 text-xs font-bold uppercase tracking-[0.14em] theme-text-accent">REVIEW BEFORE SAVING</p>
+            <h3 id="generated-preview-heading" className="mb-1 font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">Generated Questions Preview</h3>
+            <p className="mb-0 text-sm theme-text-secondary">Choose the questions you want to keep for a future step. Your selection is not saved.</p>
+          </div>
+          {generatedQuestions.length > 0 && (
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              <span className="rounded-full theme-accent-soft-surface px-3 py-1.5 text-xs font-semibold theme-text-accent" aria-live="polite">
+                {selectedGeneratedQuestions.size} selected
+              </span>
+              <button type="button" onClick={() => setSelectedGeneratedQuestions(allGeneratedQuestionsSelected ? new Set() : new Set(generatedQuestions.map((_, index) => index)))} className="min-h-9 rounded-lg border theme-border px-3 py-2 text-xs font-semibold theme-text-primary transition theme-hover-border theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">
+                {allGeneratedQuestionsSelected ? "Deselect all" : "Select all"}
+              </button>
+              {selectedGeneratedQuestions.size > 0 && (
+                <button type="button" onClick={() => setSelectedGeneratedQuestions(new Set())} className="min-h-9 rounded-lg border theme-border px-3 py-2 text-xs font-semibold theme-text-secondary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">
+                  Clear selection
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {generatingQuestions && (
+          <div className="flex items-center gap-3 border-b theme-border-subtle px-5 py-4 text-sm theme-text-secondary" role="status" aria-live="polite">
+            <span aria-hidden="true" className="h-5 w-5 animate-spin rounded-full border-2 theme-border-highlight theme-spinner-active" />
+            Generating a tailored question set...
+          </div>
+        )}
+
+        {generatedQuestions.length === 0 ? (
+          <div className="px-5 py-9 text-center sm:px-8">
+            <p className="mb-1 text-sm font-semibold theme-text-primary" role="status">No generated questions to preview yet.</p>
+            <p className="mb-0 text-sm theme-text-secondary">Set your preferences above and generate a question set to review it here.</p>
+          </div>
+        ) : (
+          <div className="space-y-4 p-4 sm:p-6">
+            {generatedQuestions.map((question, index) => {
+              const selected = selectedGeneratedQuestions.has(index);
+              return (
+                <article key={`${index}-${question.questionText}`} className={`min-w-0 rounded-xl border theme-inset-surface p-4 transition sm:p-5 ${selected ? "border-emerald-400/60 shadow-[0_0_0_1px_rgba(52,211,153,0.12)]" : "theme-border-subtle"}`}>
+                  <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-3 flex flex-wrap items-center gap-2">
+                        <span className="rounded-full theme-accent-soft-surface px-2.5 py-1 text-xs font-semibold theme-text-accent">Question {index + 1}</span>
+                        <span className="rounded-full theme-card-surface px-2.5 py-1 text-xs font-medium theme-text-secondary">{question.category}</span>
+                        <span className="rounded-full theme-card-surface px-2.5 py-1 text-xs font-medium theme-text-secondary">{question.difficulty}</span>
+                      </div>
+                      <h4 className="mb-0 break-words text-base font-semibold leading-7 theme-text-primary">{question.questionText}</h4>
+                    </div>
+                    <label className="inline-flex min-h-10 shrink-0 cursor-pointer items-center gap-2 rounded-lg border theme-border px-3 py-2 text-sm font-semibold theme-text-primary transition theme-hover-border theme-hover-surface focus-within:ring-2 theme-focus-ring">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => setSelectedGeneratedQuestions((current) => {
+                          const next = new Set(current);
+                          if (next.has(index)) next.delete(index);
+                          else next.add(index);
+                          return next;
+                        })}
+                        className="h-4 w-4 accent-emerald-400"
+                        aria-label={`Select generated question ${index + 1}`}
+                      />
+                      Select
+                    </label>
+                  </div>
+                  <details className="group mt-4 border-t theme-border-subtle pt-3">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-semibold theme-text-accent focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">
+                      <span>Expected answer</span>
+                      <svg aria-hidden="true" className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+                    </summary>
+                    <p className="mb-0 mt-3 whitespace-pre-wrap break-words text-sm leading-6 theme-text-secondary">{question.expectedAnswer}</p>
+                  </details>
+                </article>
+              );
+            })}
+            {selectedGeneratedQuestions.size === 0 && (
+              <p className="mb-0 rounded-lg border theme-border-subtle px-4 py-3 text-sm theme-text-secondary" role="status">No questions selected. Select questions individually or use Select all.</p>
+            )}
+          </div>
+        )}
+      </section>
 
       <section className="overflow-hidden rounded-2xl border theme-border theme-card-surface shadow-sm" aria-labelledby="questions-heading">
         <div className="flex flex-col gap-4 border-b theme-border-subtle px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">

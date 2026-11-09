@@ -8,6 +8,7 @@ import interviewRoutes from "./routes/interviewRoutes.js";
 import User from "./models/User.js";
 import questionRoutes from "./routes/questionRoutes.js";
 import resultRoutes from "./routes/resultRoutes.js";
+import aiQuestionRoutes from "./routes/aiQuestionRoutes.js";
 
 
 dotenv.config();
@@ -38,6 +39,7 @@ app.get("/api/health", (req, res) => {
 app.use("/api/auth", authRoutes);
 
 app.use("/api/interviews", interviewRoutes);
+app.use("/api/interviews", aiQuestionRoutes);
 app.use("/api/questions", questionRoutes);
 app.use("/api/results", resultRoutes);
 
