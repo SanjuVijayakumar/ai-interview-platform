@@ -4,6 +4,7 @@ import DashboardLayout from "./layouts/DashboardLayout.jsx";
 import DashboardPage from "./pages/DashboardPage.jsx";
 import InterviewsPage from "./pages/InterviewsPage.jsx";
 import InterviewDetailsPage from "./pages/InterviewDetailsPage.jsx";
+import MockSessionPage from "./pages/MockSessionPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
 import { getAuthToken, logoutUser } from "./services/authService.js";
@@ -43,6 +44,7 @@ function AppRoutes({ healthMessage }) {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/interviews" element={<InterviewsPage />} />
         <Route path="/interviews/:interviewId" element={<InterviewDetailsPage />} />
+        <Route path="/mock-session/:sessionId" element={<MockSessionPage />} />
       </Route>
 
       <Route

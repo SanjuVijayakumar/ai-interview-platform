@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { getInterviewById } from "../services/interviewService.js";
 import { createQuestion, deleteQuestion, generateInterviewQuestions, getQuestions, updateQuestion } from "../services/questionService.js";
+import { createMockSession, findInProgressMockSession } from "../services/mockSessionService.js";
 
 const blankQuestionForm = { questionText: "", category: "", difficulty: "Beginner", order: "1", expectedAnswer: "" };
 const difficulties = ["Beginner", "Intermediate", "Advanced"];
@@ -66,10 +67,45 @@ function InterviewDetailsPage() {
   const [generatedSaveFailures, setGeneratedSaveFailures] = useState(() => new Map());
   const [savingGeneratedQuestions, setSavingGeneratedQuestions] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState({ type: "", message: "" });
+  const [inProgressSession, setInProgressSession] = useState(null);
+  const [sessionLookupLoading, setSessionLookupLoading] = useState(true);
+  const [sessionActionLoading, setSessionActionLoading] = useState(false);
+  const [sessionError, setSessionError] = useState("");
   const generationInProgress = useRef(false);
   const generationRequestId = useRef(0);
   const saveInProgress = useRef(false);
   const saveRequestId = useRef(0);
+  const sessionActionInProgress = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    setInProgressSession(null);
+    setSessionError("");
+    setSessionLookupLoading(true);
+
+    async function checkInProgressSession() {
+      try {
+        const session = await findInProgressMockSession(interviewId);
+        if (active) setInProgressSession(session);
+      } catch (requestError) {
+        if (!active) return;
+        if (requestError.status === 404 && /no in-progress session/i.test(requestError.message)) return;
+        const message = requestError.message || "Unable to check for an in-progress mock interview.";
+        if (requestError.status === 401 || /session is missing|authentication|token|access denied|sign in/i.test(message)) {
+          navigate("/login", { replace: true });
+          return;
+        }
+        setSessionError(message);
+      } finally {
+        if (active) setSessionLookupLoading(false);
+      }
+    }
+
+    if (interviewId) checkInProgressSession();
+    else setSessionLookupLoading(false);
+
+    return () => { active = false; };
+  }, [interviewId, navigate]);
 
   useEffect(() => {
     let active = true;
@@ -521,6 +557,40 @@ function InterviewDetailsPage() {
     }
   };
 
+  const handleStartOrResumeMockInterview = async () => {
+    if (sessionActionInProgress.current || !interviewId) return;
+    sessionActionInProgress.current = true;
+    setSessionActionLoading(true);
+    setSessionError("");
+
+    try {
+      let session;
+      try {
+        session = await findInProgressMockSession(interviewId);
+      } catch (lookupError) {
+        if (!(lookupError.status === 404 && /no in-progress session/i.test(lookupError.message))) throw lookupError;
+      }
+
+      if (!session) session = await createMockSession(interviewId);
+      if (!session?._id) throw new Error("The mock interview session could not be opened. Please try again.");
+
+      setInProgressSession(session.status === "in-progress" ? session : null);
+      navigate(`/mock-session/${encodeURIComponent(session._id)}`, {
+        state: { interviewId },
+      });
+    } catch (requestError) {
+      const message = requestError.message || "Unable to start the mock interview. Please try again.";
+      if (requestError.status === 401 || /session is missing|authentication|token|access denied|sign in/i.test(message)) {
+        navigate("/login", { replace: true });
+        return;
+      }
+      setSessionError(message);
+    } finally {
+      sessionActionInProgress.current = false;
+      setSessionActionLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-6 sm:space-y-8">
       <section className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
@@ -561,6 +631,29 @@ function InterviewDetailsPage() {
         </dl>
       </section>
       ) : null}
+
+      {interview && (
+        <section className="flex flex-col gap-4 rounded-2xl border theme-border-highlight theme-card-surface p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:p-6" aria-labelledby="mock-interview-heading">
+          <div className="min-w-0">
+            <p className="mb-1 text-xs font-bold uppercase tracking-[0.14em] theme-text-accent">MOCK INTERVIEW</p>
+            <h3 id="mock-interview-heading" className="mb-1 font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">Practice your interview</h3>
+            <p className="mb-0 text-sm leading-6 theme-text-secondary">Start a timed practice session with the questions saved for this interview.</p>
+          </div>
+          <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:min-w-52">
+            {inProgressSession ? (
+              <button type="button" onClick={handleStartOrResumeMockInterview} disabled={sessionActionLoading || sessionLookupLoading} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-70">
+                {sessionActionLoading ? <><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />Opening...</> : "Resume Mock Interview"}
+              </button>
+            ) : (
+              <button type="button" onClick={handleStartOrResumeMockInterview} disabled={sessionActionLoading || sessionLookupLoading || questionsLoading || questions.length === 0} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-70">
+                {sessionActionLoading || sessionLookupLoading ? <><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />{sessionActionLoading ? "Opening..." : "Checking sessions..."}</> : "Start Mock Interview"}
+              </button>
+            )}
+            {!questionsLoading && questions.length === 0 && <p className="mb-0 text-center text-xs theme-text-muted">Add at least one question to start.</p>}
+          </div>
+          {sessionError && <p className="mb-0 w-full rounded-xl border theme-border-error theme-error-surface px-4 py-3 text-sm theme-text-error sm:basis-full" role="alert">{sessionError}</p>}
+        </section>
+      )}
 
       <section className="relative overflow-hidden rounded-2xl border theme-border-highlight theme-card-surface p-5 shadow-sm sm:p-6" aria-labelledby="ai-generator-heading">
         <div aria-hidden="true" className="pointer-events-none absolute -right-12 -top-16 h-44 w-44 rounded-full bg-emerald-400/10 blur-3xl" />
