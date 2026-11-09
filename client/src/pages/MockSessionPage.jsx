@@ -1,6 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { getMockSession } from "../services/mockSessionService.js";
+import { getMockSession, saveMockSessionAnswer } from "../services/mockSessionService.js";
+
+function formatElapsedTime(seconds) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return [hours, minutes, remainder].map((part) => String(part).padStart(2, "0")).join(":");
+}
 
 function getQuestionKey(question, index) {
   return String(question.question || index);
@@ -16,16 +23,32 @@ function MockSessionPage() {
   const [answers, setAnswers] = useState({});
   const [currentIndex, setCurrentIndex] = useState(0);
   const [retryCount, setRetryCount] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [saveStatuses, setSaveStatuses] = useState({});
+  const saveStatesRef = useRef(new Map());
+  const mountedRef = useRef(false);
+  const activeSessionIdRef = useRef(sessionId);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      for (const state of saveStatesRef.current.values()) clearTimeout(state.timer);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
 
     async function loadSession() {
+      activeSessionIdRef.current = sessionId;
       setLoading(true);
       setError("");
       setSession(null);
       setAnswers({});
       setCurrentIndex(0);
+      setSaveStatuses({});
+      saveStatesRef.current.clear();
 
       try {
         const result = await getMockSession(sessionId);
@@ -60,6 +83,16 @@ function MockSessionPage() {
     return () => { active = false; };
   }, [sessionId, retryCount, navigate]);
 
+  useEffect(() => {
+    if (!session?.startedAt) return undefined;
+    const startedAt = new Date(session.startedAt).getTime();
+    if (!Number.isFinite(startedAt)) return undefined;
+    const updateElapsed = () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    updateElapsed();
+    const interval = setInterval(updateElapsed, 1000);
+    return () => clearInterval(interval);
+  }, [session?.startedAt]);
+
   const questions = session?.answers || [];
   const currentQuestion = questions[currentIndex];
   const interviewId = location.state?.interviewId || session?.interview?._id || session?.interview;
@@ -69,10 +102,65 @@ function MockSessionPage() {
     return count + (answers[getQuestionKey(question, index)]?.trim() ? 1 : 0);
   }, 0), [questions, answers]);
 
+  const flushAnswer = async (key, questionId, state) => {
+    if (!mountedRef.current || activeSessionIdRef.current !== sessionId || state.inFlight || state.version === state.savedVersion) return;
+    state.inFlight = true;
+    const requestVersion = state.version;
+    const requestText = state.text;
+    if (mountedRef.current && activeSessionIdRef.current === sessionId) setSaveStatuses((current) => ({ ...current, [key]: "saving" }));
+    try {
+      await saveMockSessionAnswer(sessionId, questionId, requestText);
+      state.savedVersion = requestVersion;
+      state.savedText = requestText;
+      if (!mountedRef.current || activeSessionIdRef.current !== sessionId) return;
+      if (state.version !== requestVersion) {
+        setSaveStatuses((current) => ({ ...current, [key]: "saving" }));
+        state.inFlight = false;
+        await flushAnswer(key, questionId, state);
+        return;
+      }
+      setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
+    } catch {
+      if (mountedRef.current && activeSessionIdRef.current === sessionId && state.version === requestVersion) {
+        setSaveStatuses((current) => ({ ...current, [key]: "failed" }));
+      } else if (mountedRef.current && activeSessionIdRef.current === sessionId && state.version !== requestVersion) {
+        state.inFlight = false;
+        await flushAnswer(key, questionId, state);
+        return;
+      }
+    } finally {
+      state.inFlight = false;
+    }
+  };
+
   const updateCurrentAnswer = (value) => {
     if (!currentQuestion) return;
     const key = getQuestionKey(currentQuestion, currentIndex);
     setAnswers((current) => ({ ...current, [key]: value }));
+    let state = saveStatesRef.current.get(key);
+    if (!state) {
+      state = { version: 0, savedVersion: 0, savedText: currentQuestion.answerText || "", text: currentQuestion.answerText || "", timer: null, inFlight: false };
+      saveStatesRef.current.set(key, state);
+    }
+    state.text = value;
+    state.version += 1;
+    clearTimeout(state.timer);
+    if (value === state.savedText) {
+      state.savedVersion = state.version;
+      setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
+      return;
+    }
+    setSaveStatuses((current) => ({ ...current, [key]: "pending" }));
+    const questionId = String(currentQuestion.question);
+    state.timer = setTimeout(() => { flushAnswer(key, questionId, state); }, 800);
+  };
+
+  const retryCurrentAnswer = () => {
+    const state = saveStatesRef.current.get(currentKey);
+    if (!state || !currentQuestion) return;
+    clearTimeout(state.timer);
+    state.timer = null;
+    flushAnswer(currentKey, String(currentQuestion.question), state);
   };
 
   if (loading) {
@@ -127,7 +215,10 @@ function MockSessionPage() {
         <div className="border-b theme-border-subtle p-5 sm:p-7">
           <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
             <span className="inline-flex rounded-full theme-accent-soft-surface px-3 py-1.5 text-sm font-bold theme-text-accent" aria-current="step">Question {currentIndex + 1} <span className="mx-1 theme-text-muted">/</span> {questions.length}</span>
-            <span className="text-xs font-medium theme-text-secondary">{answeredCount} of {questions.length} answered</span>
+            <div className="flex items-center gap-3 text-xs font-medium theme-text-secondary">
+              <span>Elapsed {formatElapsedTime(elapsedSeconds)}</span>
+              <span>{answeredCount} of {questions.length} answered</span>
+            </div>
           </div>
           <div className="h-2 overflow-hidden rounded-full theme-inset-surface" role="progressbar" aria-label="Question progress" aria-valuemin={1} aria-valuemax={questions.length} aria-valuenow={currentIndex + 1}>
             <div className="h-full rounded-full theme-primary-button transition-[width] duration-300" style={{ width: `${progressPercent}%` }} />
@@ -164,7 +255,13 @@ function MockSessionPage() {
             rows={10}
             className="min-h-64 w-full resize-y rounded-xl border theme-border theme-inset-surface px-4 py-3 text-sm leading-7 theme-text-primary outline-none transition placeholder:theme-text-muted focus:border-emerald-400/70 focus:ring-2 focus:ring-emerald-400/20 sm:min-h-80 sm:px-5 sm:py-4"
           />
-          <p className="mb-0 mt-2 text-xs theme-text-muted">Your draft stays in this page for now and is not saved to your account.</p>
+          <div className="mt-2 flex min-h-5 flex-wrap items-center justify-between gap-2 text-xs" aria-live="polite">
+            {saveStatuses[currentKey] === "saving" || saveStatuses[currentKey] === "pending" ? <span className="theme-text-secondary">Saving...</span> : null}
+            {saveStatuses[currentKey] === "saved" ? <span className="theme-text-accent">Saved</span> : null}
+            {saveStatuses[currentKey] === "failed" ? <span className="theme-text-error">Save failed</span> : null}
+            {saveStatuses[currentKey] === "failed" ? <button type="button" onClick={retryCurrentAnswer} className="font-semibold theme-text-accent underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Retry</button> : null}
+            {!saveStatuses[currentKey] ? <span className="theme-text-muted">Your answer is saved automatically.</span> : null}
+          </div>
         </div>
 
         <footer className="flex flex-col-reverse gap-3 border-t theme-border-subtle p-5 sm:flex-row sm:items-center sm:justify-between sm:px-7">
