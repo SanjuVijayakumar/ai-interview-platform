@@ -1,4 +1,6 @@
-import { Link, useLocation, useParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { getInterviewById } from "../services/interviewService.js";
 
 function formatDate(value) {
   if (!value || Number.isNaN(new Date(value).getTime())) return "Date unavailable";
@@ -26,8 +28,44 @@ function DetailItem({ label, children }) {
 
 function InterviewDetailsPage() {
   const { interviewId } = useParams();
-  const { state } = useLocation();
-  const interview = state?.interview;
+  const navigate = useNavigate();
+  const [interview, setInterview] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadInterview() {
+      setLoading(true);
+      setError("");
+      setInterview(null);
+
+      try {
+        const result = await getInterviewById(interviewId);
+        if (active) setInterview(result);
+      } catch (requestError) {
+        if (!active) return;
+        const message = requestError.message || "Unable to load this interview. Please try again.";
+        if (/session is missing|authentication|token|access denied|sign in/i.test(message)) {
+          navigate("/login", { replace: true });
+          return;
+        }
+        if (/invalid interview id/i.test(message)) {
+          setError("This interview ID is invalid.");
+        } else if (/interview not found/i.test(message)) {
+          setError("This interview was not found or does not belong to your account.");
+        } else {
+          setError(message);
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadInterview();
+    return () => { active = false; };
+  }, [interviewId, navigate]);
 
   return (
     <div className="space-y-6 sm:space-y-8">
@@ -43,6 +81,17 @@ function InterviewDetailsPage() {
         </Link>
       </section>
 
+      {loading ? (
+        <section className="flex min-h-64 items-center justify-center gap-3 rounded-2xl border theme-border theme-card-surface text-sm theme-text-secondary" role="status" aria-live="polite">
+          <span className="h-5 w-5 animate-spin rounded-full border-2 theme-border-highlight theme-spinner-active" aria-hidden="true" />
+          Loading interview details…
+        </section>
+      ) : error ? (
+        <section className="rounded-2xl border theme-border-error theme-error-surface p-6 text-center" role="alert">
+          <p className="mb-4 text-sm theme-text-error">{error}</p>
+          <Link to="/interviews" className="inline-flex min-h-10 items-center justify-center rounded-xl border theme-border px-4 py-2.5 text-sm font-semibold theme-text-primary transition theme-hover-surface">Back to Interviews</Link>
+        </section>
+      ) : interview ? (
       <section className="rounded-2xl border theme-border theme-card-surface p-5 shadow-sm sm:p-6" aria-labelledby="interview-info-heading">
         <div className="mb-5 border-b theme-border-subtle pb-4">
           <h3 id="interview-info-heading" className="mb-1 font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">Interview information</h3>
@@ -54,9 +103,10 @@ function InterviewDetailsPage() {
           <DetailItem label="Difficulty">{interview?.difficulty || "Difficulty unavailable"}</DetailItem>
           <DetailItem label="Status"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${statusClasses(interview?.status)}`}>{displayStatus(interview?.status)}</span></DetailItem>
           <DetailItem label="Created date"><time dateTime={interview?.createdAt || undefined}>{formatDate(interview?.createdAt)}</time></DetailItem>
-          {interviewId && <DetailItem label="Interview ID">{interviewId}</DetailItem>}
+          {interview._id && <DetailItem label="Interview ID">{interview._id}</DetailItem>}
         </dl>
       </section>
+      ) : null}
 
       <section className="overflow-hidden rounded-2xl border theme-border theme-card-surface shadow-sm" aria-labelledby="questions-heading">
         <div className="flex flex-col gap-4 border-b theme-border-subtle px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">

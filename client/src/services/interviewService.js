@@ -31,6 +31,11 @@ export async function getInterviews() {
   return data.interviews;
 }
 
+export async function getInterviewById(interviewId) {
+  const data = await request(`/${encodeURIComponent(interviewId)}`);
+  return data.interview;
+}
+
 export async function createInterview(interview) {
   const data = await request("", { method: "POST", body: JSON.stringify(interview) });
   return data.interview;

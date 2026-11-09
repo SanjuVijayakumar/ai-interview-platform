@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { createInterview, deleteInterview, getInterviews, updateInterview } from "../services/interviewService.js";
 
 const blankForm = { title: "", category: "", difficulty: "Beginner", status: "scheduled" };
@@ -214,7 +215,8 @@ function InterviewsPage() {
                     {interview.completedAt && <span><span className="font-medium theme-text-secondary">Completed</span> {formatDate(interview.completedAt)}</span>}
                   </div>
                 </div>
-                <div className="flex shrink-0 gap-2 sm:flex-col">
+                <div className="flex shrink-0 flex-wrap gap-2 sm:flex-col">
+                  <Link to={`/interviews/${encodeURIComponent(interview._id)}`} className="inline-flex min-h-9 items-center justify-center rounded-lg theme-primary-button px-3 py-2 text-xs font-semibold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">View Details</Link>
                   <button type="button" onClick={() => openEdit(interview)} className="rounded-lg border theme-border px-3 py-2 text-xs font-semibold theme-text-primary transition theme-hover-border theme-hover-surface theme-hover-text-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Edit</button>
                   <button type="button" onClick={() => handleDelete(interview)} disabled={deletingId === interview._id} className="rounded-lg border theme-border-error px-3 py-2 text-xs font-semibold theme-text-error transition theme-hover-error-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-error-ring disabled:cursor-wait disabled:opacity-60">{deletingId === interview._id ? "Deleting…" : "Delete"}</button>
                 </div>
