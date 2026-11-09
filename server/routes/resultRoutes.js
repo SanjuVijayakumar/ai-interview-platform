@@ -1,326 +1,163 @@
 import express from "express";
 import mongoose from "mongoose";
-
 import InterviewResult from "../models/InterviewResult.js";
-import User from "../models/User.js";
 import Interview from "../models/Interview.js";
 import Question from "../models/Question.js";
+import authMiddleware from "../middleware/authMiddleware.js";
 
 const router = express.Router();
+router.use(authMiddleware);
 
-// POST: Create an interview result
+const hasOnlyKeys = (value, allowed) =>
+  value && typeof value === "object" && !Array.isArray(value) &&
+  Object.keys(value).every((key) => allowed.includes(key));
+
+function sendValidationError(res, error) {
+  if (error.name === "ValidationError" || error.name === "CastError") {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+  return res.status(500).json({ success: false, message: "Failed to process interview result" });
+}
+
+// Create a result for the authenticated user. Question data is snapshotted server-side.
 router.post("/", async (req, res) => {
   try {
-    const {
-      user,
-      interview,
-      answers,
-      totalScore,
-      overallFeedback,
-      status,
-    } = req.body;
-
-    // Validate required fields
-    if (!user || !interview || !Array.isArray(answers)) {
-      return res.status(400).json({
-        success: false,
-        message: "User, interview, and answers are required",
-      });
+    if (!hasOnlyKeys(req.body, ["interview", "answers"])) {
+      return res.status(400).json({ success: false, message: "Only interview and answers may be provided" });
     }
-
-    // Validate User ID
-    if (!mongoose.isValidObjectId(user)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid user ID",
-      });
+    const { interview, answers } = req.body;
+    if (!mongoose.isValidObjectId(interview) || !Array.isArray(answers)) {
+      return res.status(400).json({ success: false, message: "A valid interview ID and answers array are required" });
     }
-
-    // Validate Interview ID
-    if (!mongoose.isValidObjectId(interview)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid interview ID",
-      });
-    }
-
-    // Check whether the user exists
-    const existingUser = await User.findById(user);
-
-    if (!existingUser) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
-
-    // Check whether the interview exists
-    const existingInterview = await Interview.findById(interview);
-
+    const existingInterview = await Interview.findOne({ _id: interview, user: req.user.userId });
     if (!existingInterview) {
-      return res.status(404).json({
-        success: false,
-        message: "Interview not found",
-      });
+      return res.status(404).json({ success: false, message: "Interview not found" });
     }
-
-    // Validate each answer
+    const questions = await Question.find({ interview }).sort({ order: 1 });
+    const suppliedAnswers = new Map();
     for (const answer of answers) {
-      if (!mongoose.isValidObjectId(answer.question)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid question ID in answers",
-        });
+      if (!hasOnlyKeys(answer, ["question", "answerText"]) ||
+          !mongoose.isValidObjectId(answer.question) ||
+          (answer.answerText !== undefined && typeof answer.answerText !== "string")) {
+        return res.status(400).json({ success: false, message: "Each answer must contain a valid question ID and optional answer text" });
       }
-
-      const existingQuestion = await Question.findOne({
-        _id: answer.question,
-        interview,
-      });
-
-      if (!existingQuestion) {
-        return res.status(404).json({
-          success: false,
-          message: "Question not found in this interview",
-        });
+      const questionId = String(answer.question);
+      if (suppliedAnswers.has(questionId)) {
+        return res.status(400).json({ success: false, message: "Duplicate question IDs are not allowed" });
       }
+      suppliedAnswers.set(questionId, answer.answerText || "");
+    }
+    const questionIds = new Set(questions.map((question) => String(question._id)));
+    if ([...suppliedAnswers.keys()].some((id) => !questionIds.has(id))) {
+      return res.status(400).json({ success: false, message: "Answers must reference questions in this interview" });
     }
 
-    // Create the interview result
     const result = await InterviewResult.create({
-      user,
+      user: req.user.userId,
       interview,
-      answers,
-      totalQuestions: answers.length,
-      totalScore,
-      overallFeedback,
-      status,
-      ...(status === "completed"
-        ? { completedAt: new Date() }
-        : {}),
+      totalQuestions: questions.length,
+      startedAt: new Date(),
+      status: "in-progress",
+      answers: questions.map((question) => ({
+        question: question._id,
+        questionText: question.questionText,
+        category: question.category,
+        difficulty: question.difficulty,
+        order: question.order,
+        answerText: suppliedAnswers.get(String(question._id)) || "",
+      })),
     });
-
-    res.status(201).json({
-      success: true,
-      message: "Interview result created successfully",
-      result,
-    });
+    return res.status(201).json({ success: true, message: "Interview result created successfully", result });
   } catch (error) {
-    if (
-      error.name === "ValidationError" ||
-      error.name === "CastError"
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: error.message,
-      });
-    }
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to create interview result",
-    });
+    return sendValidationError(res, error);
   }
 });
 
-
-// GET: Retrieve all interview results
 router.get("/", async (req, res) => {
   try {
-    const results = await InterviewResult.find()
-      .populate("user", "name email")
+    const results = await InterviewResult.find({ user: req.user.userId })
       .populate("interview", "title category difficulty")
-      .populate("answers.question", "questionText category difficulty")
       .sort({ createdAt: -1 });
-
-    res.status(200).json({
-      success: true,
-      count: results.length,
-      results,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to retrieve interview results",
-    });
+    return res.status(200).json({ success: true, count: results.length, results });
+  } catch {
+    return res.status(500).json({ success: false, message: "Failed to retrieve interview results" });
   }
 });
 
-
-// GET: Retrieve a single interview result by ID
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-
-    // Validate Result ID
     if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid interview result ID",
-      });
+      return res.status(400).json({ success: false, message: "Invalid interview result ID" });
     }
-
-    // Find the interview result
-    const result = await InterviewResult.findById(id)
-      .populate("user", "name email")
-      .populate("interview", "title category difficulty")
-      .populate(
-        "answers.question",
-        "questionText category difficulty"
-      );
-
-    // Check whether the result exists
-    if (!result) {
-      return res.status(404).json({
-        success: false,
-        message: "Interview result not found",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      result,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to retrieve interview result",
-    });
+    const result = await InterviewResult.findOne({ _id: id, user: req.user.userId })
+      .populate("interview", "title category difficulty");
+    if (!result) return res.status(404).json({ success: false, message: "Interview result not found" });
+    return res.status(200).json({ success: true, result });
+  } catch {
+    return res.status(500).json({ success: false, message: "Failed to retrieve interview result" });
   }
 });
 
-// PATCH: Update an existing interview result
 router.patch("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-
-    // Validate Result ID
     if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid interview result ID",
-      });
+      return res.status(400).json({ success: false, message: "Invalid interview result ID" });
+    }
+    if (!hasOnlyKeys(req.body, ["answers"]) || !Array.isArray(req.body.answers) || req.body.answers.length === 0) {
+      return res.status(400).json({ success: false, message: "Only a non-empty answers array may be updated" });
+    }
+    const result = await InterviewResult.findOne({ _id: id, user: req.user.userId });
+    if (!result) return res.status(404).json({ success: false, message: "Interview result not found" });
+    if (result.status === "completed") {
+      return res.status(409).json({ success: false, message: "Completed interview results cannot be modified" });
     }
 
-    // Allow only specific fields to be updated
-    const allowedFields = [
-      "answers",
-      "totalScore",
-      "overallFeedback",
-      "status",
-    ];
-
-    const updates = {};
-
-    for (const field of allowedFields) {
-      if (req.body[field] !== undefined) {
-        updates[field] = req.body[field];
+    const requested = new Map();
+    for (const answer of req.body.answers) {
+      if (!hasOnlyKeys(answer, ["question", "answerText"]) ||
+          !mongoose.isValidObjectId(answer.question) || typeof answer.answerText !== "string") {
+        return res.status(400).json({ success: false, message: "Each update must contain a valid question ID and answer text" });
       }
+      const questionId = String(answer.question);
+      if (requested.has(questionId)) return res.status(400).json({ success: false, message: "Duplicate question IDs are not allowed" });
+      requested.set(questionId, answer.answerText);
     }
-
-    // Check whether there are valid fields to update
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "No valid fields provided for update",
-      });
+    const snapshotIds = new Set(result.answers.map((answer) => String(answer.question)));
+    if ([...requested.keys()].some((questionId) => !snapshotIds.has(questionId))) {
+      return res.status(400).json({ success: false, message: "Answers must reference questions in this result" });
     }
-
-    // Validate answers if provided
-    if (updates.answers !== undefined && !Array.isArray(updates.answers)) {
-      return res.status(400).json({
-        success: false,
-        message: "Answers must be an array",
-      });
+    for (const answer of result.answers) {
+      if (requested.has(String(answer.question))) answer.answerText = requested.get(String(answer.question));
     }
-
-    // Set completion date when status becomes completed
-    if (updates.status === "completed") {
-      updates.completedAt = new Date();
-    }
-
-    // Update the result
-    const result = await InterviewResult.findByIdAndUpdate(
-      id,
-      { $set: updates },
-      {
-        new: true,
-        runValidators: true,
-      }
-    )
-      .populate("user", "name email")
-      .populate("interview", "title category difficulty")
-      .populate(
-        "answers.question",
-        "questionText category difficulty"
-      );
-
-    // Check whether the result exists
-    if (!result) {
-      return res.status(404).json({
-        success: false,
-        message: "Interview result not found",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: "Interview result updated successfully",
-      result,
-    });
+    await result.save();
+    await result.populate("interview", "title category difficulty");
+    return res.status(200).json({ success: true, message: "Interview result updated successfully", result });
   } catch (error) {
-    if (
-      error.name === "ValidationError" ||
-      error.name === "CastError"
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: error.message,
-      });
-    }
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to update interview result",
-    });
+    return sendValidationError(res, error);
   }
 });
 
-
-// DELETE: Delete an interview result
 router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-
-    // Validate Result ID
     if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid interview result ID",
-      });
+      return res.status(400).json({ success: false, message: "Invalid interview result ID" });
     }
-
-    // Find and delete the interview result
-    const result = await InterviewResult.findByIdAndDelete(id);
-
-    // Check whether the result exists
+    const result = await InterviewResult.findOneAndDelete({
+      _id: id,
+      user: req.user.userId,
+      status: { $ne: "completed" },
+    });
     if (!result) {
-      return res.status(404).json({
-        success: false,
-        message: "Interview result not found",
-      });
+      const ownedResult = await InterviewResult.exists({ _id: id, user: req.user.userId });
+      if (!ownedResult) return res.status(404).json({ success: false, message: "Interview result not found" });
+      return res.status(409).json({ success: false, message: "Completed interview results cannot be modified" });
     }
-
-    res.status(200).json({
-      success: true,
-      message: "Interview result deleted successfully",
-      resultId: result._id,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete interview result",
-    });
+    return res.status(200).json({ success: true, message: "Interview result deleted successfully", resultId: result._id });
+  } catch {
+    return res.status(500).json({ success: false, message: "Failed to delete interview result" });
   }
 });
 

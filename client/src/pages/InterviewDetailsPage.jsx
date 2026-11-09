@@ -21,6 +21,13 @@ function statusClasses(status) {
   return "theme-status-warning";
 }
 
+function questionMatchesGenerated(savedQuestion, generatedQuestion) {
+  return savedQuestion.questionText?.trim() === generatedQuestion.questionText?.trim() &&
+    savedQuestion.category?.trim() === generatedQuestion.category?.trim() &&
+    savedQuestion.difficulty === generatedQuestion.difficulty &&
+    (savedQuestion.expectedAnswer || "").trim() === (generatedQuestion.expectedAnswer || "").trim();
+}
+
 function DetailItem({ label, children }) {
   return (
     <div className="min-w-0 rounded-xl border theme-border-subtle theme-inset-surface p-4">
@@ -55,8 +62,14 @@ function InterviewDetailsPage() {
   const [generationError, setGenerationError] = useState("");
   const [generatedQuestions, setGeneratedQuestions] = useState([]);
   const [selectedGeneratedQuestions, setSelectedGeneratedQuestions] = useState(() => new Set());
+  const [savedGeneratedQuestions, setSavedGeneratedQuestions] = useState(() => new Set());
+  const [generatedSaveFailures, setGeneratedSaveFailures] = useState(() => new Map());
+  const [savingGeneratedQuestions, setSavingGeneratedQuestions] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState({ type: "", message: "" });
   const generationInProgress = useRef(false);
   const generationRequestId = useRef(0);
+  const saveInProgress = useRef(false);
+  const saveRequestId = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -128,15 +141,26 @@ function InterviewDetailsPage() {
 
   const sortedQuestions = [...questions].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   const selectedDifficulty = generationDifficulty || interview?.difficulty || "Intermediate";
-  const allGeneratedQuestionsSelected = generatedQuestions.length > 0 &&
-    selectedGeneratedQuestions.size === generatedQuestions.length;
+  const selectableGeneratedQuestionIndices = generatedQuestions
+    .map((_, index) => index)
+    .filter((index) => !savedGeneratedQuestions.has(index));
+  const selectedGeneratedQuestionCount = [...selectedGeneratedQuestions]
+    .filter((index) => !savedGeneratedQuestions.has(index)).length;
+  const allGeneratedQuestionsSelected = selectableGeneratedQuestionIndices.length > 0 &&
+    selectableGeneratedQuestionIndices.every((index) => selectedGeneratedQuestions.has(index));
 
   useEffect(() => {
     generationRequestId.current += 1;
     generationInProgress.current = false;
+    saveRequestId.current += 1;
+    saveInProgress.current = false;
     setGeneratingQuestions(false);
+    setSavingGeneratedQuestions(false);
     setGeneratedQuestions([]);
     setSelectedGeneratedQuestions(new Set());
+    setSavedGeneratedQuestions(new Set());
+    setGeneratedSaveFailures(new Map());
+    setSaveFeedback({ type: "", message: "" });
     setGenerationError("");
     setGenerationDifficulty("");
   }, [interviewId]);
@@ -271,7 +295,7 @@ function InterviewDetailsPage() {
   };
 
   const handleGenerateQuestions = async () => {
-    if (generationInProgress.current) return;
+    if (generationInProgress.current || saveInProgress.current) return;
 
     const count = Number(generationCount);
     if (!Number.isInteger(count) || count < 1 || count > 10) {
@@ -313,6 +337,9 @@ function InterviewDetailsPage() {
 
       setGeneratedQuestions(result);
       setSelectedGeneratedQuestions(new Set());
+      setSavedGeneratedQuestions(new Set());
+      setGeneratedSaveFailures(new Map());
+      setSaveFeedback({ type: "", message: "" });
     } catch (requestError) {
       if (requestId !== generationRequestId.current) return;
       const message = requestError.message || "Unable to generate questions. Please try again.";
@@ -326,6 +353,170 @@ function InterviewDetailsPage() {
       if (requestId === generationRequestId.current) {
         generationInProgress.current = false;
         setGeneratingQuestions(false);
+      }
+    }
+  };
+
+  const handleSaveSelectedQuestions = async () => {
+    if (saveInProgress.current) return;
+
+    const selectedIndices = [...selectedGeneratedQuestions]
+      .filter((index) => !savedGeneratedQuestions.has(index))
+      .sort((a, b) => a - b);
+    if (selectedIndices.length === 0) {
+      setSaveFeedback({ type: "error", message: "No questions are selected to save." });
+      return;
+    }
+
+    saveInProgress.current = true;
+    const requestId = ++saveRequestId.current;
+    setSavingGeneratedQuestions(true);
+    setSaveFeedback({ type: "", message: "" });
+    setGeneratedSaveFailures(new Map());
+
+    try {
+      const existingQuestions = await getQuestions(interviewId);
+      if (requestId !== saveRequestId.current) return;
+
+      let nextOrder = existingQuestions.reduce((highest, question) => {
+        const order = Number(question.order);
+        return Number.isFinite(order) ? Math.max(highest, Math.floor(order)) : highest;
+      }, 0) + 1;
+      const successfulIndices = [];
+      const failedItems = [];
+      let unauthorized = false;
+      let orderStateUncertain = false;
+
+      for (const index of selectedIndices) {
+        const generatedQuestion = generatedQuestions[index];
+        if (generatedQuestion && existingQuestions.some((question) => questionMatchesGenerated(question, generatedQuestion))) {
+          successfulIndices.push(index);
+        }
+      }
+
+      for (let position = 0; position < selectedIndices.length; position += 1) {
+        if (requestId !== saveRequestId.current) return;
+        const index = selectedIndices[position];
+        if (successfulIndices.includes(index)) continue;
+        const question = generatedQuestions[index];
+        if (!question) {
+          failedItems.push({ index, message: "This preview question is no longer available." });
+          continue;
+        }
+
+        if (unauthorized || orderStateUncertain) {
+          failedItems.push({
+            index,
+            message: unauthorized
+              ? "Your session expired before this question could be saved."
+              : "A previous save could not be verified, so this question was held to avoid an order conflict. Retry after refreshing.",
+          });
+          continue;
+        }
+
+        try {
+          await createQuestion({
+            interview: interviewId,
+            questionText: question.questionText,
+            category: question.category,
+            difficulty: question.difficulty,
+            expectedAnswer: question.expectedAnswer,
+            order: nextOrder,
+          });
+          successfulIndices.push(index);
+          nextOrder += 1;
+        } catch (saveError) {
+          const message = saveError.message || "This question could not be saved.";
+          let confirmedSaved = false;
+          try {
+            const currentQuestions = await getQuestions(interviewId);
+            if (requestId !== saveRequestId.current) return;
+            confirmedSaved = currentQuestions.some((savedQuestion) => questionMatchesGenerated(savedQuestion, question));
+            if (confirmedSaved) {
+              successfulIndices.push(index);
+              nextOrder = currentQuestions.reduce((highest, currentQuestion) => {
+                const order = Number(currentQuestion.order);
+                return Number.isFinite(order) ? Math.max(highest, Math.floor(order)) : highest;
+              }, 0) + 1;
+            }
+          } catch {
+            orderStateUncertain = true;
+          }
+          if (!confirmedSaved) failedItems.push({ index, message });
+          if (saveError.status === 401 || /session is missing|authentication token/i.test(message)) {
+            unauthorized = true;
+          }
+        }
+      }
+
+      if (requestId !== saveRequestId.current) return;
+      let refreshError = "";
+      if (successfulIndices.length > 0 || failedItems.length > 0) {
+        setQuestionsLoading(true);
+        setQuestionsError("");
+        try {
+          const refreshedQuestions = await getQuestions(interviewId);
+          if (requestId !== saveRequestId.current) return;
+          setQuestions(refreshedQuestions);
+
+          for (let position = failedItems.length - 1; position >= 0; position -= 1) {
+            const failed = failedItems[position];
+            const attempted = generatedQuestions[failed.index];
+            const alreadyPresent = attempted && refreshedQuestions.some((savedQuestion) =>
+              questionMatchesGenerated(savedQuestion, attempted)
+            );
+            if (alreadyPresent) {
+              successfulIndices.push(failed.index);
+              failedItems.splice(position, 1);
+            }
+          }
+        } catch (error) {
+          if (requestId !== saveRequestId.current) return;
+          refreshError = error.message || "The saved questions could not be refreshed.";
+          setQuestionsError(refreshError);
+        } finally {
+          if (requestId === saveRequestId.current) setQuestionsLoading(false);
+        }
+      }
+
+      if (successfulIndices.length > 0) {
+        setSavedGeneratedQuestions((current) => new Set([...current, ...successfulIndices]));
+        setSelectedGeneratedQuestions((current) => new Set(
+          [...current].filter((index) => !successfulIndices.includes(index))
+        ));
+      }
+      setGeneratedSaveFailures(new Map(failedItems.map(({ index, message }) => [index, message])));
+
+      if (unauthorized) {
+        setSaveFeedback({ type: "error", message: "Your session expired. Sign in again to retry the unsaved questions." });
+        navigate("/login", { replace: true });
+      } else if (failedItems.length > 0) {
+        const refreshMessage = refreshError ? ` The question list could not be refreshed: ${refreshError}` : "";
+        setSaveFeedback({
+          type: "error",
+          message: `${successfulIndices.length} saved; ${failedItems.length} could not be saved. Failed questions remain selected so you can retry.${refreshMessage}`,
+        });
+      } else {
+        setSaveFeedback({
+          type: refreshError ? "error" : "success",
+          message: refreshError
+            ? `All selected questions were saved, but the question list could not be refreshed: ${refreshError}`
+            : "All selected questions saved successfully.",
+        });
+      }
+    } catch (error) {
+      if (requestId !== saveRequestId.current) return;
+      const message = error.message || "Saving failed. Check your connection and try again.";
+      if (error.status === 401 || /session is missing|authentication token/i.test(message)) {
+        setSaveFeedback({ type: "error", message: "Your session expired. Sign in again to save the selected questions." });
+        navigate("/login", { replace: true });
+      } else {
+        setSaveFeedback({ type: "error", message: `Saving failed. No questions were saved. ${message}` });
+      }
+    } finally {
+      if (requestId === saveRequestId.current) {
+        saveInProgress.current = false;
+        setSavingGeneratedQuestions(false);
       }
     }
   };
@@ -448,7 +639,7 @@ function InterviewDetailsPage() {
 
           <div className="mt-6 flex flex-col gap-3 border-t theme-border-subtle pt-5 sm:flex-row sm:items-center sm:justify-between">
             <p className="mb-0 max-w-xl text-xs leading-5 theme-text-muted">Questions will be tailored to this interview and your candidate profile.</p>
-            <button type="button" onClick={handleGenerateQuestions} disabled={generatingQuestions} className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold shadow-sm theme-shadow-green transition hover:-translate-y-0.5 theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70 sm:w-auto">
+            <button type="button" onClick={handleGenerateQuestions} disabled={generatingQuestions || savingGeneratedQuestions} className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold shadow-sm theme-shadow-green transition hover:-translate-y-0.5 theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70 sm:w-auto">
               {generatingQuestions ? (
                 <><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />Generating...</>
               ) : (
@@ -465,18 +656,19 @@ function InterviewDetailsPage() {
           <div>
             <p className="mb-1 text-xs font-bold uppercase tracking-[0.14em] theme-text-accent">REVIEW BEFORE SAVING</p>
             <h3 id="generated-preview-heading" className="mb-1 font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">Generated Questions Preview</h3>
-            <p className="mb-0 text-sm theme-text-secondary">Choose the questions you want to keep for a future step. Your selection is not saved.</p>
+            <p className="mb-0 text-sm theme-text-secondary">Review the questions and save only the ones you want to add to this interview.</p>
           </div>
           {generatedQuestions.length > 0 && (
             <div className="flex shrink-0 flex-wrap items-center gap-2">
               <span className="rounded-full theme-accent-soft-surface px-3 py-1.5 text-xs font-semibold theme-text-accent" aria-live="polite">
-                {selectedGeneratedQuestions.size} selected
+                {selectedGeneratedQuestionCount} selected
               </span>
-              <button type="button" onClick={() => setSelectedGeneratedQuestions(allGeneratedQuestionsSelected ? new Set() : new Set(generatedQuestions.map((_, index) => index)))} className="min-h-9 rounded-lg border theme-border px-3 py-2 text-xs font-semibold theme-text-primary transition theme-hover-border theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">
+              {savedGeneratedQuestions.size > 0 && <span className="rounded-full theme-success-surface px-3 py-1.5 text-xs font-semibold theme-text-success">{savedGeneratedQuestions.size} saved</span>}
+              <button type="button" disabled={savingGeneratedQuestions || selectableGeneratedQuestionIndices.length === 0} onClick={() => setSelectedGeneratedQuestions(allGeneratedQuestionsSelected ? new Set() : new Set(selectableGeneratedQuestionIndices))} className="min-h-9 rounded-lg border theme-border px-3 py-2 text-xs font-semibold theme-text-primary transition theme-hover-border theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-not-allowed disabled:opacity-60">
                 {allGeneratedQuestionsSelected ? "Deselect all" : "Select all"}
               </button>
-              {selectedGeneratedQuestions.size > 0 && (
-                <button type="button" onClick={() => setSelectedGeneratedQuestions(new Set())} className="min-h-9 rounded-lg border theme-border px-3 py-2 text-xs font-semibold theme-text-secondary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">
+              {selectedGeneratedQuestionCount > 0 && (
+                <button type="button" disabled={savingGeneratedQuestions} onClick={() => setSelectedGeneratedQuestions(new Set())} className="min-h-9 rounded-lg border theme-border px-3 py-2 text-xs font-semibold theme-text-secondary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-not-allowed disabled:opacity-60">
                   Clear selection
                 </button>
               )}
@@ -499,22 +691,25 @@ function InterviewDetailsPage() {
         ) : (
           <div className="space-y-4 p-4 sm:p-6">
             {generatedQuestions.map((question, index) => {
+              const saved = savedGeneratedQuestions.has(index);
               const selected = selectedGeneratedQuestions.has(index);
               return (
-                <article key={`${index}-${question.questionText}`} className={`min-w-0 rounded-xl border theme-inset-surface p-4 transition sm:p-5 ${selected ? "border-emerald-400/60 shadow-[0_0_0_1px_rgba(52,211,153,0.12)]" : "theme-border-subtle"}`}>
+                <article key={`${index}-${question.questionText}`} className={`min-w-0 rounded-xl border theme-inset-surface p-4 transition sm:p-5 ${selected || saved ? "border-emerald-400/60 shadow-[0_0_0_1px_rgba(52,211,153,0.12)]" : "theme-border-subtle"}`}>
                   <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0 flex-1">
                       <div className="mb-3 flex flex-wrap items-center gap-2">
                         <span className="rounded-full theme-accent-soft-surface px-2.5 py-1 text-xs font-semibold theme-text-accent">Question {index + 1}</span>
                         <span className="rounded-full theme-card-surface px-2.5 py-1 text-xs font-medium theme-text-secondary">{question.category}</span>
                         <span className="rounded-full theme-card-surface px-2.5 py-1 text-xs font-medium theme-text-secondary">{question.difficulty}</span>
+                        {saved && <span className="rounded-full theme-success-surface px-2.5 py-1 text-xs font-semibold theme-text-success">Saved</span>}
                       </div>
                       <h4 className="mb-0 break-words text-base font-semibold leading-7 theme-text-primary">{question.questionText}</h4>
                     </div>
                     <label className="inline-flex min-h-10 shrink-0 cursor-pointer items-center gap-2 rounded-lg border theme-border px-3 py-2 text-sm font-semibold theme-text-primary transition theme-hover-border theme-hover-surface focus-within:ring-2 theme-focus-ring">
                       <input
                         type="checkbox"
-                        checked={selected}
+                        checked={selected || saved}
+                        disabled={savingGeneratedQuestions || saved}
                         onChange={() => setSelectedGeneratedQuestions((current) => {
                           const next = new Set(current);
                           if (next.has(index)) next.delete(index);
@@ -534,12 +729,33 @@ function InterviewDetailsPage() {
                     </summary>
                     <p className="mb-0 mt-3 whitespace-pre-wrap break-words text-sm leading-6 theme-text-secondary">{question.expectedAnswer}</p>
                   </details>
+                  {generatedSaveFailures.has(index) && (
+                    <p className="mb-0 mt-3 rounded-lg border theme-border-error theme-error-surface px-3 py-2 text-sm theme-text-error" role="alert">
+                      Save failed: {generatedSaveFailures.get(index)}
+                    </p>
+                  )}
                 </article>
               );
             })}
-            {selectedGeneratedQuestions.size === 0 && (
+            {selectedGeneratedQuestionCount === 0 && selectableGeneratedQuestionIndices.length > 0 && (
               <p className="mb-0 rounded-lg border theme-border-subtle px-4 py-3 text-sm theme-text-secondary" role="status">No questions selected. Select questions individually or use Select all.</p>
             )}
+            {selectableGeneratedQuestionIndices.length === 0 && (
+              <p className="mb-0 rounded-lg border theme-border-success theme-success-surface px-4 py-3 text-sm theme-text-success" role="status">All questions in this preview have been saved.</p>
+            )}
+            {saveFeedback.message && (
+              <p className={`mb-0 rounded-xl border px-4 py-3 text-sm ${saveFeedback.type === "success" ? "theme-border-success theme-success-surface theme-text-success" : "theme-border-error theme-error-surface theme-text-error"}`} role={saveFeedback.type === "success" ? "status" : "alert"}>
+                {saveFeedback.message}
+              </p>
+            )}
+            <div className="flex flex-col gap-3 border-t theme-border-subtle pt-4 sm:flex-row sm:items-center sm:justify-between">
+              <p className="mb-0 text-xs theme-text-muted">Saved questions are added after the highest existing question order.</p>
+              <button type="button" onClick={handleSaveSelectedQuestions} disabled={savingGeneratedQuestions || questionSaving || questionModalOpen || Boolean(deletingQuestionId) || selectedGeneratedQuestionCount === 0} className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto">
+                {savingGeneratedQuestions ? (
+                  <><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />Saving selected questions...</>
+                ) : `Save Selected Questions (${selectedGeneratedQuestionCount})`}
+              </button>
+            </div>
           </div>
         )}
       </section>
@@ -555,7 +771,7 @@ function InterviewDetailsPage() {
             </div>
             <p className="mb-0 text-sm theme-text-secondary">Build a focused question set for your practice.</p>
           </div>
-          <button type="button" onClick={openQuestionModal} disabled={!interviewId} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-xl theme-primary-button px-4 py-2.5 text-sm font-semibold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
+          <button type="button" onClick={openQuestionModal} disabled={!interviewId || savingGeneratedQuestions} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-xl theme-primary-button px-4 py-2.5 text-sm font-semibold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
             <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
             Add Question
           </button>
@@ -589,8 +805,8 @@ function InterviewDetailsPage() {
                       <span className="rounded-full theme-card-surface px-2.5 py-1 text-xs font-medium theme-text-secondary">{question.difficulty}</span>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                      <button type="button" onClick={() => openEditQuestionModal(question)} disabled={Boolean(deletingQuestionId)} className="rounded-lg border theme-border px-3 py-1.5 text-xs font-semibold theme-text-secondary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-60">Edit</button>
-                      <button type="button" onClick={() => handleDeleteQuestion(question)} disabled={Boolean(deletingQuestionId) || questionSaving} className="rounded-lg border theme-border-error px-3 py-1.5 text-xs font-semibold theme-text-error transition theme-hover-error-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-error-ring disabled:cursor-wait disabled:opacity-60">
+                      <button type="button" onClick={() => openEditQuestionModal(question)} disabled={Boolean(deletingQuestionId) || savingGeneratedQuestions} className="rounded-lg border theme-border px-3 py-1.5 text-xs font-semibold theme-text-secondary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-60">Edit</button>
+                      <button type="button" onClick={() => handleDeleteQuestion(question)} disabled={Boolean(deletingQuestionId) || questionSaving || savingGeneratedQuestions} className="rounded-lg border theme-border-error px-3 py-1.5 text-xs font-semibold theme-text-error transition theme-hover-error-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-error-ring disabled:cursor-wait disabled:opacity-60">
                         {deletingQuestionId === question._id ? "Deleting..." : "Delete"}
                       </button>
                     </div>

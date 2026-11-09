@@ -9,6 +9,7 @@ import User from "./models/User.js";
 import questionRoutes from "./routes/questionRoutes.js";
 import resultRoutes from "./routes/resultRoutes.js";
 import aiQuestionRoutes from "./routes/aiQuestionRoutes.js";
+import mockSessionRoutes from "./routes/mockSessionRoutes.js";
 
 
 dotenv.config();
@@ -42,6 +43,7 @@ app.use("/api/interviews", interviewRoutes);
 app.use("/api/interviews", aiQuestionRoutes);
 app.use("/api/questions", questionRoutes);
 app.use("/api/results", resultRoutes);
+app.use("/api", mockSessionRoutes);
 
 app.post("/api/test-user", async (req, res) => {
   try {

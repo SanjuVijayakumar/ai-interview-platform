@@ -22,6 +22,12 @@ const interviewResultSchema = new mongoose.Schema(
           required: true,
         },
 
+        // Immutable copy of the question as it appeared when this attempt began.
+        questionText: { type: String, default: "" },
+        category: { type: String, default: "" },
+        difficulty: { type: String, default: "" },
+        order: { type: Number, min: 1 },
+
         answerText: {
           type: String,
           default: "",
@@ -63,6 +69,17 @@ const interviewResultSchema = new mongoose.Schema(
       type: String,
       enum: ["in-progress", "completed"],
       default: "in-progress",
+    },
+
+    startedAt: {
+      type: Date,
+      default: null,
+    },
+
+    durationSeconds: {
+      type: Number,
+      min: 0,
+      default: null,
     },
 
     completedAt: {
