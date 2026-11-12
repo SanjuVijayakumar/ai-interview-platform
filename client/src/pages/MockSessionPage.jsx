@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { getMockSession, saveMockSessionAnswer } from "../services/mockSessionService.js";
+import { completeMockSession, getMockSession, saveMockSessionAnswer } from "../services/mockSessionService.js";
 
 function formatElapsedTime(seconds) {
   const hours = Math.floor(seconds / 3600);
@@ -11,6 +11,10 @@ function formatElapsedTime(seconds) {
 
 function getQuestionKey(question, index) {
   return String(question.question || index);
+}
+
+function isCompletedSessionError(error) {
+  return error?.status === 409 && error.message === "Completed sessions cannot be modified";
 }
 
 function MockSessionPage() {
@@ -25,7 +29,12 @@ function MockSessionPage() {
   const [retryCount, setRetryCount] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [saveStatuses, setSaveStatuses] = useState({});
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [completing, setCompleting] = useState(false);
+  const [completionError, setCompletionError] = useState("");
   const saveStatesRef = useRef(new Map());
+  const exitFlushPromiseRef = useRef(null);
+  const completionLockRef = useRef(false);
   const mountedRef = useRef(false);
   const activeSessionIdRef = useRef(sessionId);
 
@@ -41,6 +50,12 @@ function MockSessionPage() {
     let active = true;
 
     async function loadSession() {
+      const previousSessionId = activeSessionIdRef.current;
+      const previousEntries = [...saveStatesRef.current.entries()];
+      for (const [, state] of previousEntries) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
       activeSessionIdRef.current = sessionId;
       setLoading(true);
       setError("");
@@ -48,7 +63,35 @@ function MockSessionPage() {
       setAnswers({});
       setCurrentIndex(0);
       setSaveStatuses({});
-      saveStatesRef.current.clear();
+      completionLockRef.current = false;
+      setCompleting(false);
+      setConfirmOpen(false);
+      setCompletionError("");
+
+      // Drain answers under their captured session IDs before replacing the state map.
+      // This also runs on a retry after a failed transition, since old entries remain
+      // in the map until every save has been confirmed.
+      try {
+        for (const [key, state] of previousEntries) {
+          const stateSessionId = state.sessionId || previousSessionId;
+          if (stateSessionId === sessionId) continue;
+          if (state.version === state.savedVersion && !state.promise) continue;
+          try {
+            await flushAnswer(key, state.questionId, state, { allowUnmount: true });
+          } catch {
+            await flushAnswer(key, state.questionId, state, { allowUnmount: true, force: true });
+          }
+        }
+      } catch {
+        if (!active) return;
+        setError("Could not save answers from the previous session. Retry to preserve them before opening this session.");
+        setLoading(false);
+        return;
+      }
+      if (!active) return;
+      for (const [key, state] of previousEntries) {
+        if (saveStatesRef.current.get(key) === state) saveStatesRef.current.delete(key);
+      }
 
       try {
         const result = await getMockSession(sessionId);
@@ -102,65 +145,172 @@ function MockSessionPage() {
     return count + (answers[getQuestionKey(question, index)]?.trim() ? 1 : 0);
   }, 0), [questions, answers]);
 
-  const flushAnswer = async (key, questionId, state) => {
-    if (!mountedRef.current || activeSessionIdRef.current !== sessionId || state.inFlight || state.version === state.savedVersion) return;
-    state.inFlight = true;
-    const requestVersion = state.version;
-    const requestText = state.text;
-    if (mountedRef.current && activeSessionIdRef.current === sessionId) setSaveStatuses((current) => ({ ...current, [key]: "saving" }));
-    try {
-      await saveMockSessionAnswer(sessionId, questionId, requestText);
-      state.savedVersion = requestVersion;
-      state.savedText = requestText;
-      if (!mountedRef.current || activeSessionIdRef.current !== sessionId) return;
-      if (state.version !== requestVersion) {
-        setSaveStatuses((current) => ({ ...current, [key]: "saving" }));
-        state.inFlight = false;
-        await flushAnswer(key, questionId, state);
-        return;
-      }
-      setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
-    } catch {
-      if (mountedRef.current && activeSessionIdRef.current === sessionId && state.version === requestVersion) {
-        setSaveStatuses((current) => ({ ...current, [key]: "failed" }));
-      } else if (mountedRef.current && activeSessionIdRef.current === sessionId && state.version !== requestVersion) {
-        state.inFlight = false;
-        await flushAnswer(key, questionId, state);
-        return;
-      }
-    } finally {
-      state.inFlight = false;
+  const markSessionCompleted = useCallback((completedSessionId) => {
+    for (const [key, state] of saveStatesRef.current.entries()) {
+      if ((state.sessionId || sessionId) !== completedSessionId) continue;
+      clearTimeout(state.timer);
+      state.timer = null;
+      state.completed = true;
+      setSaveStatuses((current) => ({ ...current, [key]: "completed" }));
     }
-  };
+    if (activeSessionIdRef.current !== completedSessionId) return;
+    setSession((current) => (
+      current && String(current._id) === completedSessionId
+        ? { ...current, status: "completed" }
+        : current
+    ));
+  }, [sessionId]);
+
+  const flushAnswer = useCallback(async (key, questionId, state, { allowUnmount = false, keepalive = false, force = false } = {}) => {
+    if ((!mountedRef.current && !allowUnmount)) return;
+    const stateSessionId = state.sessionId || sessionId;
+    if (state.completed || (activeSessionIdRef.current === stateSessionId && session?.status === "completed")) return;
+    if (state.promise) {
+      if (keepalive) state.keepaliveOnNext = true;
+      return state.promise;
+    }
+    if (state.version === state.savedVersion && !force) return;
+    state.promise = (async () => {
+      let forceRequest = force;
+      while (!state.completed && (forceRequest || state.version !== state.savedVersion)) {
+        const requestVersion = state.version;
+        const requestText = state.text;
+        if (mountedRef.current && activeSessionIdRef.current === stateSessionId) setSaveStatuses((current) => ({ ...current, [key]: "saving" }));
+        try {
+          const requestKeepalive = keepalive || state.keepaliveOnNext;
+          state.keepaliveOnNext = false;
+          await saveMockSessionAnswer(stateSessionId, questionId, requestText, { keepalive: requestKeepalive });
+          if (state.completed) break;
+          state.savedVersion = requestVersion;
+          state.savedText = requestText;
+          forceRequest = false;
+        } catch (saveError) {
+          if (isCompletedSessionError(saveError)) markSessionCompleted(stateSessionId);
+          if (state.text === state.savedText) {
+            state.savedVersion = state.version;
+            if (!state.completed && mountedRef.current && activeSessionIdRef.current === stateSessionId) setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
+            if (!allowUnmount) return;
+          } else if (!state.completed && mountedRef.current && activeSessionIdRef.current === stateSessionId) {
+            setSaveStatuses((current) => ({ ...current, [key]: "failed" }));
+          }
+          throw saveError;
+        }
+      }
+      state.keepaliveOnNext = false;
+      if (!state.completed && mountedRef.current && activeSessionIdRef.current === stateSessionId) setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
+    })();
+    try {
+      await state.promise;
+    } finally {
+      state.promise = null;
+    }
+  }, [markSessionCompleted, session?.status, sessionId]);
+
+  const flushPendingOnExit = useCallback(() => {
+    if (exitFlushPromiseRef.current) return exitFlushPromiseRef.current;
+    const pendingEntries = [...saveStatesRef.current.entries()];
+    exitFlushPromiseRef.current = (async () => {
+      for (const [key, state] of pendingEntries) {
+        clearTimeout(state.timer);
+        state.timer = null;
+        if (state.version === state.savedVersion && !state.promise) continue;
+        try {
+          await flushAnswer(key, state.questionId, state, { allowUnmount: true, keepalive: true });
+        } catch {
+          // A pending non-keepalive request may be interrupted by page teardown.
+          // After it settles, make one serialized keepalive write of the latest text.
+          try {
+            await flushAnswer(key, state.questionId, state, { allowUnmount: true, keepalive: true, force: true });
+          } catch {
+            // Browser lifecycle events cannot guarantee that the final request is delivered.
+          }
+        }
+      }
+    })().finally(() => {
+      exitFlushPromiseRef.current = null;
+    });
+    return exitFlushPromiseRef.current;
+  }, [flushAnswer]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flushPendingOnExit();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pagehide", flushPendingOnExit);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pagehide", flushPendingOnExit);
+      flushPendingOnExit();
+    };
+  }, [flushPendingOnExit]);
 
   const updateCurrentAnswer = (value) => {
-    if (!currentQuestion) return;
+    if (!currentQuestion || completionLockRef.current || session?.status === "completed") return;
     const key = getQuestionKey(currentQuestion, currentIndex);
-    setAnswers((current) => ({ ...current, [key]: value }));
     let state = saveStatesRef.current.get(key);
+    if (state?.completed) return;
+    setAnswers((current) => ({ ...current, [key]: value }));
     if (!state) {
-      state = { version: 0, savedVersion: 0, savedText: currentQuestion.answerText || "", text: currentQuestion.answerText || "", timer: null, inFlight: false };
+      state = { sessionId, questionId: String(currentQuestion.question), version: 0, savedVersion: 0, savedText: currentQuestion.answerText || "", text: currentQuestion.answerText || "", timer: null, promise: null, keepaliveOnNext: false };
       saveStatesRef.current.set(key, state);
     }
     state.text = value;
     state.version += 1;
     clearTimeout(state.timer);
     if (value === state.savedText) {
-      state.savedVersion = state.version;
-      setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
+      if (state.promise) {
+        setSaveStatuses((current) => ({ ...current, [key]: "saving" }));
+      } else {
+        state.savedVersion = state.version;
+        setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
+      }
       return;
     }
     setSaveStatuses((current) => ({ ...current, [key]: "pending" }));
     const questionId = String(currentQuestion.question);
-    state.timer = setTimeout(() => { flushAnswer(key, questionId, state); }, 800);
+    state.timer = setTimeout(() => { flushAnswer(key, questionId, state).catch(() => {}); }, 800);
   };
 
   const retryCurrentAnswer = () => {
     const state = saveStatesRef.current.get(currentKey);
-    if (!state || !currentQuestion) return;
+    if (!state || state.completed || !currentQuestion || session?.status === "completed") return;
     clearTimeout(state.timer);
     state.timer = null;
-    flushAnswer(currentKey, String(currentQuestion.question), state);
+    flushAnswer(currentKey, String(currentQuestion.question), state).catch(() => {});
+  };
+
+  const completeInterview = async () => {
+    if (completionLockRef.current || !session || session.status === "completed") return;
+    const completingSessionId = sessionId;
+    completionLockRef.current = true;
+    setCompleting(true);
+    setCompletionError("");
+    try {
+      const saveEntries = [...saveStatesRef.current.entries()];
+      for (const [key, state] of saveEntries) {
+        clearTimeout(state.timer);
+        state.timer = null;
+        const questionIndex = questions.findIndex((item, index) => getQuestionKey(item, index) === key);
+        if (questionIndex < 0) continue;
+        await flushAnswer(key, String(questions[questionIndex].question), state);
+        if (activeSessionIdRef.current !== completingSessionId) return;
+      }
+      if (activeSessionIdRef.current !== completingSessionId) return;
+      const completedSession = await completeMockSession(completingSessionId);
+      if (activeSessionIdRef.current !== completingSessionId) return;
+      for (const state of saveStatesRef.current.values()) clearTimeout(state.timer);
+      saveStatesRef.current.clear();
+      setSession((current) => ({ ...current, ...completedSession, status: "completed" }));
+      setConfirmOpen(false);
+      navigate(backPath, { replace: true, state: { notice: "Mock interview completed successfully." } });
+    } catch (requestError) {
+      if (activeSessionIdRef.current !== completingSessionId) return;
+      completionLockRef.current = false;
+      setCompletionError(requestError.message || "Could not complete the interview. Your answers remain available; please retry.");
+    } finally {
+      if (activeSessionIdRef.current === completingSessionId) setCompleting(false);
+    }
   };
 
   if (loading) {
@@ -208,7 +358,10 @@ function MockSessionPage() {
           <h1 className="mb-1 font-[Manrope,sans-serif] text-xl font-bold theme-text-primary sm:text-2xl">Interview practice session</h1>
           <p className="mb-0 text-sm theme-text-secondary">{session.status === "completed" ? "Completed session" : "In progress"} <span aria-hidden="true">·</span> {questions.length} {questions.length === 1 ? "question" : "questions"}</p>
         </div>
-        <Link to={backPath} className="inline-flex min-h-10 w-full shrink-0 items-center justify-center rounded-xl border theme-border px-4 py-2.5 text-sm font-semibold theme-text-primary transition theme-hover-border theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring sm:w-auto">{backLabel}</Link>
+        <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row">
+          {session.status !== "completed" && <button type="button" onClick={() => { setCompletionError(""); setConfirmOpen(true); }} disabled={completing} className="inline-flex min-h-10 w-full items-center justify-center rounded-xl theme-primary-button px-4 py-2.5 text-sm font-bold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-60 sm:w-auto">Complete Interview</button>}
+          <Link to={backPath} className="inline-flex min-h-10 w-full shrink-0 items-center justify-center rounded-xl border theme-border px-4 py-2.5 text-sm font-semibold theme-text-primary transition theme-hover-border theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring sm:w-auto">{backLabel}</Link>
+        </div>
       </header>
 
       <section className="overflow-hidden rounded-2xl border theme-border-highlight theme-card-surface shadow-sm" aria-labelledby="question-heading">
@@ -251,6 +404,7 @@ function MockSessionPage() {
             id="mock-answer"
             value={answers[currentKey] || ""}
             onChange={(event) => updateCurrentAnswer(event.target.value)}
+            disabled={completing || session.status === "completed"}
             placeholder="Take a moment to structure your response, then write it here..."
             rows={10}
             className="min-h-64 w-full resize-y rounded-xl border theme-border theme-inset-surface px-4 py-3 text-sm leading-7 theme-text-primary outline-none transition placeholder:theme-text-muted focus:border-emerald-400/70 focus:ring-2 focus:ring-emerald-400/20 sm:min-h-80 sm:px-5 sm:py-4"
@@ -258,8 +412,9 @@ function MockSessionPage() {
           <div className="mt-2 flex min-h-5 flex-wrap items-center justify-between gap-2 text-xs" aria-live="polite">
             {saveStatuses[currentKey] === "saving" || saveStatuses[currentKey] === "pending" ? <span className="theme-text-secondary">Saving...</span> : null}
             {saveStatuses[currentKey] === "saved" ? <span className="theme-text-accent">Saved</span> : null}
-            {saveStatuses[currentKey] === "failed" ? <span className="theme-text-error">Save failed</span> : null}
-            {saveStatuses[currentKey] === "failed" ? <button type="button" onClick={retryCurrentAnswer} className="font-semibold theme-text-accent underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Retry</button> : null}
+            {saveStatuses[currentKey] === "completed" ? <span className="theme-text-secondary">Session completed. This answer could not be saved.</span> : null}
+            {saveStatuses[currentKey] === "failed" && session.status !== "completed" ? <span className="theme-text-error">Save failed</span> : null}
+            {saveStatuses[currentKey] === "failed" && session.status !== "completed" ? <button type="button" onClick={retryCurrentAnswer} className="font-semibold theme-text-accent underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Retry</button> : null}
             {!saveStatuses[currentKey] ? <span className="theme-text-muted">Your answer is saved automatically.</span> : null}
           </div>
         </div>
@@ -270,6 +425,23 @@ function MockSessionPage() {
           <button type="button" onClick={() => setCurrentIndex((index) => Math.min(questions.length - 1, index + 1))} disabled={currentIndex === questions.length - 1} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-2.5 text-sm font-bold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">Next</button>
         </footer>
       </section>
+      {completionError && <p className="rounded-xl border theme-border-error theme-error-surface px-4 py-3 text-sm theme-text-error" role="alert">{completionError}</p>}
+      {confirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto theme-modal-overlay p-4" onMouseDown={(event) => { if (!completing && event.target === event.currentTarget) setConfirmOpen(false); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="complete-interview-title" className="my-auto w-full max-w-md rounded-2xl border theme-border theme-card-surface p-5 shadow-xl sm:p-7">
+            <p className="mb-1 text-xs font-bold uppercase tracking-[0.14em] theme-text-accent">SUBMIT SESSION</p>
+            <h2 id="complete-interview-title" className="mb-2 font-[Manrope,sans-serif] text-xl font-bold theme-text-primary">Complete this interview?</h2>
+            <p className="mb-6 text-sm leading-6 theme-text-secondary">Your answers will be submitted. After completion, you will not be able to continue answering.</p>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button type="button" onClick={() => setConfirmOpen(false)} disabled={completing} className="rounded-xl border theme-border px-4 py-2.5 text-sm font-semibold theme-text-secondary transition theme-hover-surface disabled:opacity-50">Cancel</button>
+              <button type="button" onClick={completeInterview} disabled={completing} className="inline-flex items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-2.5 text-sm font-semibold theme-text-primary transition theme-hover-primary disabled:cursor-wait disabled:opacity-60">
+                {completing && <span className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" aria-hidden="true" />}
+                {completing ? "Saving and submitting..." : "Confirm completion"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

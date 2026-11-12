@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { getInterviewById } from "../services/interviewService.js";
 import { createQuestion, deleteQuestion, generateInterviewQuestions, getQuestions, updateQuestion } from "../services/questionService.js";
 import { createMockSession, findInProgressMockSession } from "../services/mockSessionService.js";
@@ -40,6 +40,7 @@ function DetailItem({ label, children }) {
 
 function InterviewDetailsPage() {
   const { interviewId } = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const [interview, setInterview] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -52,7 +53,7 @@ function InterviewDetailsPage() {
   const [questionForm, setQuestionForm] = useState(blankQuestionForm);
   const [questionSaving, setQuestionSaving] = useState(false);
   const [questionFormError, setQuestionFormError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState(location.state?.notice || "");
   const [actionError, setActionError] = useState("");
   const [deletingQuestionId, setDeletingQuestionId] = useState("");
   const [generationCount, setGenerationCount] = useState("5");

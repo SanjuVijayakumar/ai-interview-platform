@@ -215,7 +215,7 @@ router.patch("/:id", async (req, res) => {
       id,
       { $set: updates },
       {
-        new: true,
+        returnDocument: "after",
         runValidators: true,
       }
     );

@@ -135,7 +135,7 @@ router.patch("/mock-sessions/:sessionId/answers/:questionId", async (req, res) =
         answers: { $elemMatch: { question: questionId } },
       },
       { $set: { "answers.$.answerText": body.answerText } },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     );
     if (!session) {
       const ownedSession = await InterviewResult.findOne({ _id: sessionId, user: req.user.userId }).select("status answers.question");
@@ -192,7 +192,7 @@ router.post("/mock-sessions/:sessionId/complete", async (req, res) => {
     const session = await InterviewResult.findOneAndUpdate(
       { _id: sessionId, user: req.user.userId, status: "in-progress" },
       { $set: { status: "completed", completedAt, durationSeconds } },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     );
     if (session) return res.status(200).json({ success: true, message: "Mock interview session completed", session: sessionPayload(session) });
 

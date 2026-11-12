@@ -56,7 +56,7 @@ export async function getMockSession(sessionId) {
   return data.session;
 }
 
-export async function saveMockSessionAnswer(sessionId, questionId, answerText) {
+export async function saveMockSessionAnswer(sessionId, questionId, answerText, { keepalive = false } = {}) {
   const session = requireId(sessionId, "Session ID");
   const question = requireId(questionId, "Question ID");
   if (typeof answerText !== "string") throw new Error("Answer text must be a string.");
@@ -64,6 +64,7 @@ export async function saveMockSessionAnswer(sessionId, questionId, answerText) {
   return request(`/mock-sessions/${session}/answers/${question}`, {
     method: "PATCH",
     body: JSON.stringify({ answerText }),
+    keepalive,
   });
 }
 
