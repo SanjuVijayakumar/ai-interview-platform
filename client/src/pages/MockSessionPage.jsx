@@ -154,6 +154,7 @@ function MockSessionPage() {
       setSaveStatuses((current) => ({ ...current, [key]: "completed" }));
     }
     if (activeSessionIdRef.current !== completedSessionId) return;
+    setConfirmOpen(false);
     setSession((current) => (
       current && String(current._id) === completedSessionId
         ? { ...current, status: "completed" }
@@ -209,28 +210,28 @@ function MockSessionPage() {
   const flushPendingOnExit = useCallback(() => {
     if (exitFlushPromiseRef.current) return exitFlushPromiseRef.current;
     const pendingEntries = [...saveStatesRef.current.entries()];
-    exitFlushPromiseRef.current = (async () => {
-      for (const [key, state] of pendingEntries) {
-        clearTimeout(state.timer);
-        state.timer = null;
-        if (state.version === state.savedVersion && !state.promise) continue;
+    const answerFlushes = pendingEntries.map(async ([key, state]) => {
+      const stateSessionId = state.sessionId || sessionId;
+      clearTimeout(state.timer);
+      state.timer = null;
+      if (state.completed || (activeSessionIdRef.current === stateSessionId && session?.status === "completed")) return;
+      if (state.version === state.savedVersion && !state.promise) return;
+      try {
+        await flushAnswer(key, state.questionId, state, { allowUnmount: true, keepalive: true });
+      } catch {
+        // Retry this answer independently so one failed write cannot block other exit flushes.
         try {
-          await flushAnswer(key, state.questionId, state, { allowUnmount: true, keepalive: true });
+          await flushAnswer(key, state.questionId, state, { allowUnmount: true, keepalive: true, force: true });
         } catch {
-          // A pending non-keepalive request may be interrupted by page teardown.
-          // After it settles, make one serialized keepalive write of the latest text.
-          try {
-            await flushAnswer(key, state.questionId, state, { allowUnmount: true, keepalive: true, force: true });
-          } catch {
-            // Browser lifecycle events cannot guarantee that the final request is delivered.
-          }
+          // Browser lifecycle events cannot guarantee that the final request is delivered.
         }
       }
-    })().finally(() => {
+    });
+    exitFlushPromiseRef.current = Promise.all(answerFlushes).finally(() => {
       exitFlushPromiseRef.current = null;
     });
     return exitFlushPromiseRef.current;
-  }, [flushAnswer]);
+  }, [flushAnswer, session?.status, sessionId]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {

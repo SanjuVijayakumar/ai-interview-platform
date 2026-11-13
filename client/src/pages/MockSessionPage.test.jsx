@@ -14,6 +14,7 @@ vi.mock("../services/mockSessionService.js", () => ({
 const SESSION_A = "session-a";
 const SESSION_B = "session-b";
 const QUESTION_A = "question-a";
+const QUESTION_A2 = "question-a2";
 const QUESTION_B = "question-b";
 
 function deferred() {
@@ -32,6 +33,21 @@ function makeSession(id, questionId, questionText) {
     status: "in-progress",
     answers: [{ question: questionId, questionText, answerText: "", order: 0 }],
   };
+}
+
+function makeTwoQuestionSession() {
+  return {
+    _id: SESSION_A,
+    status: "in-progress",
+    answers: [
+      { question: QUESTION_A, questionText: "Question from session A", answerText: "", order: 0 },
+      { question: QUESTION_A2, questionText: "Second question from session A", answerText: "", order: 1 },
+    ],
+  };
+}
+
+function dispatchPageHide() {
+  act(() => { window.dispatchEvent(new Event("pagehide")); });
 }
 
 function renderSession(sessionId = SESSION_A) {
@@ -145,6 +161,7 @@ describe("MockSessionPage autosave", () => {
     expect(screen.getByText("Session completed. This answer could not be saved.")).toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("textbox", { name: "Your answer" }), { target: { value: "Another edit" } });
+    dispatchPageHide();
     await advanceTimers(1600);
     expect(saveMockSessionAnswer).toHaveBeenCalledTimes(1);
   });
@@ -179,6 +196,106 @@ describe("MockSessionPage autosave", () => {
     expect(screen.getByRole("textbox", { name: "Your answer" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     expect(saveMockSessionAnswer).toHaveBeenCalledTimes(2);
+  });
+
+  it("dispatches all dirty answers on pagehide with their captured IDs and keepalive", async () => {
+    getMockSession.mockResolvedValueOnce(makeTwoQuestionSession());
+    renderSession();
+    expect(await screen.findByText("Question from session A")).toBeInTheDocument();
+    vi.useFakeTimers();
+    editAnswer("First answer");
+    fireEvent.click(screen.getByRole("button", { name: /Go to question 2/ }));
+    editAnswer("Second answer");
+
+    dispatchPageHide();
+
+    expect(saveMockSessionAnswer).toHaveBeenCalledTimes(2);
+    expect(saveMockSessionAnswer).toHaveBeenNthCalledWith(1, SESSION_A, QUESTION_A, "First answer", { keepalive: true });
+    expect(saveMockSessionAnswer).toHaveBeenNthCalledWith(2, SESSION_A, QUESTION_A2, "Second answer", { keepalive: true });
+    await flushPromises();
+  });
+
+  it("keeps dispatching other exit saves when one fails and retries that answer independently", async () => {
+    getMockSession.mockResolvedValueOnce(makeTwoQuestionSession());
+    const firstAnswerFailure = deferred();
+    const secondAnswerSave = deferred();
+    const firstAnswerCalls = [];
+    saveMockSessionAnswer.mockImplementation((sessionId, questionId, text, options) => {
+      if (questionId === QUESTION_A2) return secondAnswerSave.promise;
+      firstAnswerCalls.push({ sessionId, text, options });
+      return firstAnswerCalls.length === 1
+        ? firstAnswerFailure.promise
+        : Promise.resolve({ success: true });
+    });
+    renderSession();
+    expect(await screen.findByText("Question from session A")).toBeInTheDocument();
+    vi.useFakeTimers();
+    editAnswer("First answer");
+    fireEvent.click(screen.getByRole("button", { name: /Go to question 2/ }));
+    editAnswer("Second answer");
+
+    dispatchPageHide();
+    expect(saveMockSessionAnswer).toHaveBeenCalledTimes(2);
+    expect(saveMockSessionAnswer.mock.calls.map(([, questionId]) => questionId)).toEqual([QUESTION_A, QUESTION_A2]);
+
+    await act(async () => { firstAnswerFailure.reject(new Error("Exit save failed")); });
+    await flushPromises();
+    expect(saveMockSessionAnswer).toHaveBeenCalledTimes(3);
+    expect(saveMockSessionAnswer.mock.calls[2]).toEqual([SESSION_A, QUESTION_A, "First answer", { keepalive: true }]);
+
+    await act(async () => { secondAnswerSave.resolve({ success: true }); });
+    await flushPromises();
+  });
+
+  it("does not duplicate an answer request already in flight during pagehide", async () => {
+    const inFlightSave = deferred();
+    saveMockSessionAnswer.mockReturnValueOnce(inFlightSave.promise);
+    renderSession();
+    expect(await screen.findByText("Question from session A")).toBeInTheDocument();
+    vi.useFakeTimers();
+    editAnswer("Pending answer");
+    await advanceTimers(800);
+    expect(saveMockSessionAnswer).toHaveBeenCalledTimes(1);
+
+    dispatchPageHide();
+    expect(saveMockSessionAnswer).toHaveBeenCalledTimes(1);
+
+    await act(async () => { inFlightSave.resolve({ success: true }); });
+    await flushPromises();
+    expect(saveMockSessionAnswer).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not flush answers on pagehide for a completed session", async () => {
+    getMockSession.mockResolvedValueOnce({ ...makeSession(SESSION_A, QUESTION_A, "Question from session A"), status: "completed" });
+    renderSession();
+    expect(await screen.findByText(/Completed session/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Your answer" })).toBeDisabled();
+
+    dispatchPageHide();
+
+    expect(saveMockSessionAnswer).not.toHaveBeenCalled();
+  });
+
+  it("closes the completion dialog when an answer save reports the session completed", async () => {
+    const completedError = Object.assign(new Error("Completed sessions cannot be modified"), { status: 409 });
+    const pendingSave = deferred();
+    saveMockSessionAnswer.mockReturnValueOnce(pendingSave.promise);
+    renderSession();
+    expect(await screen.findByText("Question from session A")).toBeInTheDocument();
+    vi.useFakeTimers();
+    editAnswer("Answer before completion");
+    await advanceTimers(800);
+
+    fireEvent.click(screen.getByRole("button", { name: "Complete Interview" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm completion" }));
+    await act(async () => { pendingSave.reject(completedError); });
+    await flushPromises();
+
+    expect(screen.getByText(/Completed session.*1 question/)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Your answer" })).toBeDisabled();
+    expect(completeMockSession).not.toHaveBeenCalled();
   });
 
   it("retries the latest answer manually and displays Saved", async () => {
