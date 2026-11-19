@@ -1,4 +1,8 @@
-import { AIProviderError, invalidProviderOutput, normalizeProviderError } from "./normalizeProviderError.js";
+import { AIProviderError, callerCancelledError as baseCallerCancelledError, invalidProviderOutput, logProviderFailure, normalizeProviderError } from "./normalizeProviderError.js";
+
+function callerCancelledError(options = {}) {
+  return baseCallerCancelledError({ provider: "openai", ...options });
+}
 
 function inspectResponse(response, model) {
   const output = Array.isArray(response?.output) ? response.output : [];
@@ -28,9 +32,16 @@ export async function createAIAdapter({ apiKey, model, timeoutMs, client: inject
   }
 
   return {
-    async generate({ systemInstruction, userPrompt, responseSchema, maxOutputTokens, timeoutMs: requestTimeoutMs } = {}) {
+    async generate({ systemInstruction, userPrompt, responseSchema, maxOutputTokens, timeoutMs: requestTimeoutMs, signal, correlationId } = {}) {
+      const requestTimeout = requestTimeoutMs ?? timeoutMs;
+      if (signal?.aborted) {
+        throw callerCancelledError({ correlationId, attempt: 1, maxAttempts: 1, timeoutMs: requestTimeout, model });
+      }
       let response;
       try {
+        const requestOptions = {};
+        if (requestTimeout) requestOptions.timeout = requestTimeout;
+        if (signal) requestOptions.signal = signal;
         response = await client.responses.create({
           model,
           input: [
@@ -46,9 +57,21 @@ export async function createAIAdapter({ apiKey, model, timeoutMs, client: inject
             },
           },
           max_output_tokens: maxOutputTokens,
-        }, requestTimeoutMs ? { timeout: requestTimeoutMs } : undefined);
+        }, Object.keys(requestOptions).length ? requestOptions : undefined);
       } catch (error) {
-        throw normalizeProviderError(error, { timeoutMs: requestTimeoutMs ?? timeoutMs, provider: "openai" });
+        if (signal?.aborted) {
+          throw callerCancelledError({ correlationId, attempt: 1, maxAttempts: 1, timeoutMs: requestTimeout, model });
+        }
+        const normalized = normalizeProviderError(error, { timeoutMs: requestTimeout, provider: "openai", model });
+        normalized.diagnostics = {
+          ...normalized.diagnostics,
+          ...(correlationId ? { correlationId } : {}),
+          attempt: 1,
+          maxAttempts: 1,
+          willRetry: false,
+        };
+        logProviderFailure(normalized.diagnostics);
+        throw normalized;
       }
       return inspectResponse(response, model);
     },

@@ -174,3 +174,135 @@ test("maps refusal and incomplete responses to existing response errors", async 
     await assert.rejects(generateInterviewQuestions(input, { providerFactory: fake.providerFactory }), AIQuestionResponseError);
   }
 });
+
+test("all attempts within one request use the same correlation ID across attempt failures and final outcome", async () => {
+  const errorLogs = [];
+  const infoLogs = [];
+  const originalError = console.error;
+  const originalInfo = console.info;
+  console.error = (line) => errorLogs.push(line);
+  console.info = (line) => infoLogs.push(line);
+
+  const fakeAdapter = {
+    provider: "gemini",
+    model: "gemini-test-model",
+    timeoutMs: 5000,
+    async generate({ correlationId }) {
+      const err = new AIProviderError("provider_unavailable", undefined, {
+        provider: "gemini",
+        model: "gemini-test-model",
+        correlationId,
+        attempt: 1,
+        maxAttempts: 1,
+        httpStatus: 503,
+        errorCategory: "provider_unavailable",
+        willRetry: false,
+      });
+      console.error(JSON.stringify({ event: "ai_provider_request_failed", ...err.diagnostics }));
+      throw err;
+    },
+  };
+
+  try {
+    await assert.rejects(generateInterviewQuestions(input, { providerFactory: async () => fakeAdapter }), { name: "AIQuestionProviderError" });
+  } finally {
+    console.error = originalError;
+    console.info = originalInfo;
+  }
+
+  assert.equal(errorLogs.length, 1);
+  assert.equal(infoLogs.length, 1);
+  const errorRecord = JSON.parse(errorLogs[0]);
+  const infoRecord = JSON.parse(infoLogs[0]);
+
+  assert.ok(infoRecord.correlationId);
+  assert.equal(errorRecord.correlationId, infoRecord.correlationId);
+  assert.equal(infoRecord.outcome, "failure");
+  assert.equal(infoRecord.errorCategory, "provider_unavailable");
+  assert.equal(infoRecord.httpStatus, 503);
+});
+
+test("final failure outcome logs normalized error category and HTTP status", async () => {
+  const infoLogs = [];
+  const originalInfo = console.info;
+  console.info = (line) => infoLogs.push(line);
+  const fake = fakeProvider({
+    error: new AIProviderError("rate_limited", undefined, {
+      provider: "gemini",
+      httpStatus: 429,
+      errorCategory: "rate_limited",
+    }),
+  });
+  try {
+    await assert.rejects(generateInterviewQuestions(input, { providerFactory: fake.providerFactory }), { name: "AIQuestionRateLimitError" });
+  } finally {
+    console.info = originalInfo;
+  }
+  assert.equal(infoLogs.length, 1);
+  const record = JSON.parse(infoLogs[0]);
+  assert.equal(record.outcome, "failure");
+  assert.equal(record.errorCategory, "rate_limited");
+  assert.equal(record.httpStatus, 429);
+  assert.match(record.correlationId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+});
+
+test("a 504 timeout is logged in final outcome with httpStatus 504 and is not retried", async () => {
+  const infoLogs = [];
+  const originalInfo = console.info;
+  console.info = (line) => infoLogs.push(line);
+  const fake = fakeProvider({
+    error: new AIProviderError("timeout", undefined, {
+      provider: "gemini",
+      httpStatus: 504,
+      errorCategory: "timeout",
+    }),
+  });
+  try {
+    await assert.rejects(generateInterviewQuestions(input, { providerFactory: fake.providerFactory }), { name: "AIQuestionTimeoutError" });
+  } finally {
+    console.info = originalInfo;
+  }
+  assert.equal(fake.calls.length, 1);
+  assert.equal(infoLogs.length, 1);
+  const record = JSON.parse(infoLogs[0]);
+  assert.equal(record.outcome, "failure");
+  assert.equal(record.errorCategory, "timeout");
+  assert.equal(record.httpStatus, 504);
+});
+
+test("logs do not contain API keys, prompts, generated content, or credentials", async () => {
+  const secretApiKey = "AIzaSyD_SECRET_KEY_999";
+  const secretJwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secretpayload";
+  const promptSentinel = "HIGHLY_CONFIDENTIAL_PROMPT_SENTINEL";
+  const inputWithSecrets = {
+    candidate: { skills: [promptSentinel], experience: 5, targetRole: secretJwt },
+    interview: { title: "Secret Interview", category: "Confidential", difficulty: "Intermediate" },
+    preferences: { count: 2, difficulty: "Intermediate", category: "Confidential" },
+  };
+  const errorWithSecret = new AIProviderError("provider_unavailable", undefined, {
+    provider: "gemini",
+    httpStatus: 500,
+    errorCategory: "provider_unavailable",
+  });
+
+  const errorLogs = [];
+  const infoLogs = [];
+  const originalError = console.error;
+  const originalInfo = console.info;
+  console.error = (line) => errorLogs.push(line);
+  console.info = (line) => infoLogs.push(line);
+
+  const fake = fakeProvider({ error: errorWithSecret });
+  try {
+    await assert.rejects(generateInterviewQuestions(inputWithSecrets, { providerFactory: fake.providerFactory }), { name: "AIQuestionProviderError" });
+  } finally {
+    console.error = originalError;
+    console.info = originalInfo;
+  }
+
+  const combined = `${errorLogs.join("\n")}\n${infoLogs.join("\n")}`;
+  assert.equal(combined.includes(secretApiKey), false);
+  assert.equal(combined.includes(secretJwt), false);
+  assert.equal(combined.includes(promptSentinel), false);
+  assert.equal(combined.includes("Secret Interview"), false);
+});

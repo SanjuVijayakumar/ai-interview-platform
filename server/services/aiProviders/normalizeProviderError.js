@@ -67,7 +67,7 @@ function safeDiagnostics(error, { provider, timeoutMs, model, correlationId, att
     httpStatus: httpStatusFrom(error),
     errorCategory: Object.hasOwn(SAFE_MESSAGES, errorCategory) ? errorCategory : "provider_unavailable",
     timeoutMs: Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 300000 ? timeoutMs : undefined,
-    model: typeof model === "string" && /^gemini-[A-Za-z0-9._-]{1,80}$/.test(model) ? model : undefined,
+    model: typeof model === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{1,80}$/.test(model) ? model : undefined,
     providerCode: safeProviderCode(error),
     correlationId: typeof correlationId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(correlationId) ? correlationId : undefined,
     attempt: Number.isInteger(attempt) && attempt >= 1 && attempt <= 3 ? attempt : undefined,
@@ -75,6 +75,19 @@ function safeDiagnostics(error, { provider, timeoutMs, model, correlationId, att
     willRetry: typeof willRetry === "boolean" ? willRetry : undefined,
   };
   return Object.fromEntries(Object.entries(diagnostics).filter(([, value]) => value !== undefined));
+}
+
+export function callerCancelledError({ provider = "unknown", correlationId, attempt, maxAttempts, timeoutMs, model } = {}) {
+  const safe = safeDiagnostics({ name: "AbortError" }, {
+    provider,
+    timeoutMs,
+    model,
+    correlationId,
+    attempt,
+    maxAttempts,
+    willRetry: false,
+  }, "caller_cancelled");
+  return new AIProviderError("caller_cancelled", undefined, safe);
 }
 
 export class AIProviderError extends Error {
@@ -167,18 +180,20 @@ export function logProviderFailure(diagnostics) {
 }
 
 /** Logs one safe final outcome for a question-generation request. */
-export function logQuestionGenerationOutcome({ correlationId, outcome, errorCategory } = {}) {
+export function logQuestionGenerationOutcome({ correlationId, outcome, errorCategory, httpStatus } = {}) {
   try {
     const safeCorrelationId = typeof correlationId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(correlationId)
       ? correlationId
       : undefined;
     if (!safeCorrelationId || !["success", "failure", "cancelled"].includes(outcome)) return;
     const safeCategory = Object.hasOwn(SAFE_MESSAGES, errorCategory) ? errorCategory : undefined;
+    const safeStatus = Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? httpStatus : undefined;
     console.info(JSON.stringify({
       event: "ai_question_generation_completed",
       correlationId: safeCorrelationId,
       outcome,
-      ...(safeCategory ? { errorCategory: safeCategory } : {}),
+      ...(outcome !== "success" && safeCategory ? { errorCategory: safeCategory } : {}),
+      ...(outcome !== "success" && safeStatus !== undefined ? { httpStatus: safeStatus } : {}),
     }));
   } catch {
     // Diagnostics must never affect question generation.

@@ -54,3 +54,41 @@ test("normalizes OpenAI request failures without leaking messages", async () => 
     return true;
   });
 });
+
+test("logs provider failure diagnostics with correlation ID and attempt count", async () => {
+  const correlationId = "a1b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d";
+  const adapter = await createAIAdapter({ apiKey: "x", model: "openai-test-model", timeoutMs: 4000, client: mockClient(async () => {
+    throw { status: 429, message: "rate limit" };
+  }).client });
+
+  const logs = [];
+  const originalError = console.error;
+  console.error = (line) => logs.push(line);
+  try {
+    await assert.rejects(adapter.generate({ ...params, correlationId }), AIProviderError);
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(logs.length, 1);
+  const record = JSON.parse(logs[0]);
+  assert.equal(record.event, "ai_provider_request_failed");
+  assert.equal(record.provider, "openai");
+  assert.equal(record.model, "openai-test-model");
+  assert.equal(record.correlationId, correlationId);
+  assert.equal(record.attempt, 1);
+  assert.equal(record.maxAttempts, 1);
+  assert.equal(record.willRetry, false);
+  assert.equal(record.httpStatus, 429);
+  assert.equal(record.errorCategory, "rate_limited");
+});
+
+test("does not make OpenAI request when already cancelled", async () => {
+  const mock = mockClient({ output_text: '{"answer":"ok"}' });
+  const controller = new AbortController();
+  controller.abort();
+  const adapter = await createAIAdapter({ apiKey: "x", model: "m", client: mock.client });
+  await assert.rejects(adapter.generate({ ...params, signal: controller.signal }), (error) =>
+    error instanceof AIProviderError && error.code === "caller_cancelled");
+  assert.equal(mock.calls.length, 0);
+});

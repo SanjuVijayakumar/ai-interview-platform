@@ -1,4 +1,4 @@
-import { AIProviderError, invalidProviderOutput, logProviderFailure, normalizeProviderError } from "./normalizeProviderError.js";
+import { AIProviderError, callerCancelledError as baseCallerCancelledError, invalidProviderOutput, logProviderFailure, normalizeProviderError } from "./normalizeProviderError.js";
 
 const SAFETY_FINISH_REASONS = new Set(["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"]);
 const QUESTION_RETRY_DELAYS_MS = [2000, 4000];
@@ -7,18 +7,8 @@ function abortError() {
   return new DOMException("The operation was aborted.", "AbortError");
 }
 
-function callerCancelledError({ correlationId, attempt, maxAttempts, timeoutMs, model } = {}) {
-  return new AIProviderError("caller_cancelled", undefined, {
-    provider: "gemini",
-    errorName: "AbortError",
-    errorCategory: "caller_cancelled",
-    timeoutMs,
-    model,
-    correlationId,
-    ...(attempt ? { attempt } : {}),
-    ...(maxAttempts ? { maxAttempts } : {}),
-    willRetry: false,
-  });
+function callerCancelledError(options = {}) {
+  return baseCallerCancelledError({ provider: "gemini", ...options });
 }
 
 function addAttemptMetadata(error, { correlationId, attempt, maxAttempts, willRetry } = {}) {
@@ -94,6 +84,7 @@ export async function createAIAdapter({ apiKey, model, timeoutMs, client: inject
         if (remainingTimeout === 0) {
           const timeoutError = normalizeProviderError({ name: "TimeoutError", code: "ETIMEDOUT" }, { timeoutMs: requestTimeout, provider: "gemini", model });
           addAttemptMetadata(timeoutError, { correlationId, attempt: attemptNumber, maxAttempts, willRetry: false });
+          logProviderFailure(timeoutError.diagnostics);
           throw timeoutError;
         }
         try {

@@ -119,8 +119,11 @@ const validateQuestions = (value, count) => {
   }));
 };
 
-export const generateInterviewQuestions = async ({ candidate, interview, preferences }, { providerFactory = getAIProvider, signal } = {}) => {
-  const correlationId = randomUUID();
+export const generateInterviewQuestions = async (
+  { candidate, interview, preferences },
+  { providerFactory = getAIProvider, signal, correlationId: inputCorrelationId } = {}
+) => {
+  const correlationId = inputCorrelationId || randomUUID();
   const { count, difficulty, category } = preferences;
   const prompt = `Create exactly ${count} distinct, realistic interview questions for the candidate and interview below.\n\n` +
     `Candidate profile (from the platform):\n- Skills: ${candidate.skills.length ? candidate.skills.join(", ") : "Not provided"}\n` +
@@ -133,6 +136,7 @@ export const generateInterviewQuestions = async ({ candidate, interview, prefere
 
   let outcome = "failure";
   let errorCategory;
+  let httpStatus;
   try {
     let provider;
     let response;
@@ -149,7 +153,10 @@ export const generateInterviewQuestions = async ({ candidate, interview, prefere
         correlationId,
       });
     } catch (error) {
-      throw mapProviderError(error);
+      httpStatus = error?.diagnostics?.httpStatus ?? error?.httpStatus ?? error?.status;
+      const mapped = mapProviderError(error);
+      if (httpStatus && !mapped.httpStatus) mapped.httpStatus = httpStatus;
+      throw mapped;
     }
 
     if (response?.incomplete) {
@@ -172,13 +179,16 @@ export const generateInterviewQuestions = async ({ candidate, interview, prefere
     outcome = "success";
     return questions;
   } catch (error) {
+    if (!httpStatus) {
+      httpStatus = error?.httpStatus ?? error?.diagnostics?.httpStatus ?? error?.status;
+    }
     errorCategory = ["configuration", "rate_limited", "quota_exhausted", "provider_unavailable", "timeout", "refused", "incomplete_output", "invalid_output", "caller_cancelled"].includes(error?.code)
       ? error.code
       : "provider_unavailable";
     if (errorCategory === "caller_cancelled" || signal?.aborted) outcome = "cancelled";
     throw error;
   } finally {
-    logQuestionGenerationOutcome({ correlationId, outcome, errorCategory });
+    logQuestionGenerationOutcome({ correlationId, outcome, errorCategory, httpStatus });
   }
 };
 
