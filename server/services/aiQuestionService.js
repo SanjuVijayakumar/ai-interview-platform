@@ -1,52 +1,15 @@
-import OpenAI from "openai";
-
-let openAIClient;
+import { randomUUID } from "node:crypto";
+import { AIProviderConfigurationError, getAIProvider } from "../config/aiProvider.js";
+import { getLegacyOpenAIService } from "./legacyOpenAIService.js";
+import { logQuestionGenerationOutcome } from "./aiProviders/normalizeProviderError.js";
 
 class AIQuestionConfigurationError extends Error {
   constructor(message) {
     super(message);
     this.name = "AIQuestionConfigurationError";
+    this.code = "configuration";
   }
 }
-
-const readConfiguration = () => {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  const model = process.env.OPENAI_MODEL?.trim();
-
-  if (!apiKey) {
-    throw new AIQuestionConfigurationError(
-      "OpenAI API configuration is unavailable."
-    );
-  }
-
-  if (!model || /\s/.test(model)) {
-    throw new AIQuestionConfigurationError(
-      "OpenAI model configuration is invalid."
-    );
-  }
-
-  return { apiKey, model };
-};
-
-/**
- * Returns the configured model and a cached OpenAI client without making an API call.
- * Configuration is read on demand so dotenv can load before this service is used.
- */
-export const getAIQuestionService = () => {
-  const { apiKey, model } = readConfiguration();
-
-  if (!openAIClient) {
-    try {
-      openAIClient = new OpenAI({ apiKey });
-    } catch {
-      throw new AIQuestionConfigurationError(
-        "OpenAI client could not be initialized."
-      );
-    }
-  }
-
-  return { client: openAIClient, model };
-};
 
 const DIFFICULTIES = new Set(["Beginner", "Intermediate", "Advanced"]);
 const QUESTION_SCHEMA = {
@@ -72,10 +35,55 @@ const QUESTION_SCHEMA = {
 };
 
 export class AIQuestionResponseError extends Error {
-  constructor(message = "The AI returned an invalid question set.") {
+  constructor(message = "The AI returned an invalid question set.", code = "invalid_output") {
     super(message);
     this.name = "AIQuestionResponseError";
+    this.code = code;
   }
+}
+
+class AIQuestionCancelledError extends Error {
+  constructor() {
+    super("The AI question request was cancelled.");
+    this.name = "AIQuestionCancelledError";
+    this.code = "caller_cancelled";
+  }
+}
+
+function mapProviderError(error) {
+  if (error instanceof AIQuestionConfigurationError || error instanceof AIQuestionResponseError ||
+      ["AIQuestionRateLimitError", "AIQuestionTimeoutError", "AIQuestionProviderError", "AIQuestionCancelledError"].includes(error?.name)) {
+    return error;
+  }
+  if (error instanceof AIProviderConfigurationError || error?.code === "configuration") {
+    return new AIQuestionConfigurationError("AI provider configuration is unavailable or invalid.");
+  }
+  if (error?.code === "rate_limited") {
+    const rateError = new Error("The AI question service is rate limited. Please try again shortly.");
+    rateError.name = "AIQuestionRateLimitError";
+    rateError.code = "rate_limited";
+    return rateError;
+  }
+  if (error?.code === "timeout") {
+    const timeoutError = new Error("The AI question request timed out.");
+    timeoutError.name = "AIQuestionTimeoutError";
+    timeoutError.code = "timeout";
+    return timeoutError;
+  }
+  if (error?.code === "caller_cancelled") return new AIQuestionCancelledError();
+  if (["refused", "incomplete_output", "invalid_output"].includes(error?.code)) {
+    const message = error.code === "refused"
+      ? "The AI could not generate questions for this request."
+      : error.code === "incomplete_output"
+        ? "The AI could not complete the requested question set. Please try again."
+        : "The AI returned an invalid question set.";
+    return new AIQuestionResponseError(message, error.code);
+  }
+  const providerError = new Error("The AI question service is temporarily unavailable.");
+  providerError.name = "AIQuestionProviderError";
+  providerError.code = "provider_unavailable";
+  if (error?.code === "quota_exhausted") providerError.code = "quota_exhausted";
+  return providerError;
 }
 
 const validateQuestions = (value, count) => {
@@ -111,8 +119,8 @@ const validateQuestions = (value, count) => {
   }));
 };
 
-export const generateInterviewQuestions = async ({ candidate, interview, preferences }) => {
-  const { client, model } = getAIQuestionService();
+export const generateInterviewQuestions = async ({ candidate, interview, preferences }, { providerFactory = getAIProvider, signal } = {}) => {
+  const correlationId = randomUUID();
   const { count, difficulty, category } = preferences;
   const prompt = `Create exactly ${count} distinct, realistic interview questions for the candidate and interview below.\n\n` +
     `Candidate profile (from the platform):\n- Skills: ${candidate.skills.length ? candidate.skills.join(", ") : "Not provided"}\n` +
@@ -123,59 +131,58 @@ export const generateInterviewQuestions = async ({ candidate, interview, prefere
     `Each expectedAnswer must explain the key concepts of a strong answer with useful detail, not merely say what to include. ` +
     `Return only the required structured data.`;
 
-  let response;
+  let outcome = "failure";
+  let errorCategory;
   try {
-    response = await client.responses.create({
-      model,
-      input: [
-        { role: "system", content: "You generate high-quality interview practice questions." },
-        { role: "user", content: prompt },
-      ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "interview_questions",
-          strict: true,
-          schema: QUESTION_SCHEMA,
-        },
-      },
-      max_output_tokens: Math.min(12000, 1200 + count * 900),
-    });
+    let provider;
+    let response;
+    try {
+      provider = await providerFactory();
+      response = await provider.generate({
+        systemInstruction: "You generate high-quality interview practice questions.",
+        userPrompt: prompt,
+        responseSchema: QUESTION_SCHEMA,
+        maxOutputTokens: Math.min(12000, 1200 + count * 900),
+        timeoutMs: provider.timeoutMs,
+        signal,
+        retry503: provider.provider === "gemini",
+        correlationId,
+      });
+    } catch (error) {
+      throw mapProviderError(error);
+    }
+
+    if (response?.incomplete) {
+      throw new AIQuestionResponseError("The AI could not complete the requested question set. Please try again.", "incomplete_output");
+    }
+    if (response?.refused) {
+      throw new AIQuestionResponseError("The AI could not generate questions for this request.", "refused");
+    }
+    if (typeof response?.text !== "string" || !response.text.trim()) {
+      throw new AIQuestionResponseError();
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(response.text);
+    } catch {
+      throw new AIQuestionResponseError();
+    }
+    const questions = validateQuestions(parsed, count);
+    outcome = "success";
+    return questions;
   } catch (error) {
-    if (error?.name === "APIConnectionTimeoutError" || error?.code === "ETIMEDOUT") {
-      const timeoutError = new Error("The AI question request timed out.");
-      timeoutError.name = "AIQuestionTimeoutError";
-      throw timeoutError;
-    }
-    if (error?.status === 429) {
-      const rateError = new Error("The AI question service is rate limited. Please try again shortly.");
-      rateError.name = "AIQuestionRateLimitError";
-      throw rateError;
-    }
-    const providerError = new Error("The AI question service is temporarily unavailable.");
-    providerError.name = "AIQuestionProviderError";
-    throw providerError;
+    errorCategory = ["configuration", "rate_limited", "quota_exhausted", "provider_unavailable", "timeout", "refused", "incomplete_output", "invalid_output", "caller_cancelled"].includes(error?.code)
+      ? error.code
+      : "provider_unavailable";
+    if (errorCategory === "caller_cancelled" || signal?.aborted) outcome = "cancelled";
+    throw error;
+  } finally {
+    logQuestionGenerationOutcome({ correlationId, outcome, errorCategory });
   }
-
-  if (response?.status === "incomplete" || response?.incomplete_details) {
-    throw new AIQuestionResponseError("The AI could not complete the requested question set. Please try again.");
-  }
-  const outputItems = response?.output || [];
-  if (outputItems.some((item) => item.type === "message" &&
-      item.content?.some((part) => part.type === "refusal"))) {
-    throw new AIQuestionResponseError("The AI could not generate questions for this request.");
-  }
-  if (typeof response?.output_text !== "string" || !response.output_text.trim()) {
-    throw new AIQuestionResponseError();
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(response.output_text);
-  } catch {
-    throw new AIQuestionResponseError();
-  }
-  return validateQuestions(parsed, count);
 };
 
 export { AIQuestionConfigurationError };
+// Backward-compatible entry points used by answer evaluation until it is migrated.
+export const getAIQuestionService = getLegacyOpenAIService;
+export const getOpenAIService = getLegacyOpenAIService;

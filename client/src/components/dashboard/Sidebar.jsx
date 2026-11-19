@@ -24,6 +24,16 @@ const navigationItems = [
     ),
   },
   {
+    label: "My Results",
+    to: "/results",
+    icon: (
+      <>
+        <path d="M4 19V5m0 14h16" />
+        <path d="m7 15 4-4 3 2 5-6" />
+      </>
+    ),
+  },
+  {
     label: "Profile",
     to: "/profile",
     icon: (

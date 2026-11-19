@@ -7,6 +7,8 @@ import InterviewDetailsPage from "./pages/InterviewDetailsPage.jsx";
 import MockSessionPage from "./pages/MockSessionPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
+import ResultsPage from "./pages/ResultsPage.jsx";
+import EvaluationResultPage from "./pages/EvaluationResultPage.jsx";
 import { getAuthToken, logoutUser } from "./services/authService.js";
 import "./App.css";
 
@@ -17,6 +19,12 @@ function ProtectedRoute({ token, children }) {
 function AppRoutes({ healthMessage }) {
   const [token, setToken] = useState(() => getAuthToken());
   const navigate = useNavigate();
+
+  useEffect(() => {
+    const handleSessionEnd = () => setToken(null);
+    window.addEventListener("prepx:logout", handleSessionEnd);
+    return () => window.removeEventListener("prepx:logout", handleSessionEnd);
+  }, []);
 
   const handleLogin = () => {
     const savedToken = getAuthToken();
@@ -44,6 +52,8 @@ function AppRoutes({ healthMessage }) {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/interviews" element={<InterviewsPage />} />
         <Route path="/interviews/:interviewId" element={<InterviewDetailsPage />} />
+        <Route path="/results" element={<ResultsPage />} />
+        <Route path="/results/:resultId" element={<EvaluationResultPage />} />
         <Route path="/mock-session/:sessionId" element={<MockSessionPage />} />
       </Route>
 

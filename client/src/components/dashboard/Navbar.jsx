@@ -9,6 +9,14 @@ const pageDetails = {
     title: "My Interviews",
     description: "Review your practice sessions and keep building confidence.",
   },
+  "/results": {
+    title: "My Results",
+    description: "Review completed interviews and saved evaluation feedback.",
+  },
+  "/results/:resultId": {
+    title: "Evaluation Results",
+    description: "Review your performance summary and question by question feedback.",
+  },
   "/profile": {
     title: "Profile",
     description: "Manage your details and tailor your interview preparation.",
@@ -37,7 +45,9 @@ function Navbar({
   onNotificationsClick,
 }) {
   const { pathname } = useLocation();
-  const currentPage = pageDetails[pathname] || pageDetails["/dashboard"];
+  const currentPage = pageDetails[pathname]
+    || (pathname.startsWith("/results/") ? pageDetails["/results/:resultId"] : null)
+    || pageDetails["/dashboard"];
   const displayName = userName ?? user.name ?? "Your account";
   const displayRole = userRole ?? user.role ?? "Interview candidate";
   const imageUrl = avatarUrl ?? user.avatarUrl ?? user.avatar;

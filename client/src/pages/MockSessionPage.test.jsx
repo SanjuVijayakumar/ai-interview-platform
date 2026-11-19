@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, cleanup } from "@testing-library/react";
+import { act, fireEvent, render, screen, cleanup, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -93,6 +93,19 @@ afterEach(() => {
 });
 
 describe("MockSessionPage autosave", () => {
+  it("opens saved results after completing the existing session", async () => {
+    const user = userEvent.setup();
+    const { router } = renderSession();
+    expect(await screen.findByText("Question from session A")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Complete Interview" }));
+    await user.click(screen.getByRole("button", { name: "Confirm completion" }));
+
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/results/${SESSION_A}`));
+    expect(completeMockSession).toHaveBeenCalledTimes(1);
+    expect(getMockSession).toHaveBeenCalledTimes(1);
+  });
+
   it("debounces a save until 800 ms after the edit", async () => {
     renderSession();
     expect(await screen.findByText("Question from session A")).toBeInTheDocument();

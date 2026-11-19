@@ -33,4 +33,5 @@ export function getAuthToken() {
 
 export function logoutUser() {
   window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  window.dispatchEvent(new Event("prepx:logout"));
 }

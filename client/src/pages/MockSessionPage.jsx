@@ -304,7 +304,7 @@ function MockSessionPage() {
       saveStatesRef.current.clear();
       setSession((current) => ({ ...current, ...completedSession, status: "completed" }));
       setConfirmOpen(false);
-      navigate(backPath, { replace: true, state: { notice: "Mock interview completed successfully." } });
+      navigate(`/results/${encodeURIComponent(completingSessionId)}`, { replace: true });
     } catch (requestError) {
       if (activeSessionIdRef.current !== completingSessionId) return;
       completionLockRef.current = false;
@@ -361,6 +361,7 @@ function MockSessionPage() {
         </div>
         <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row">
           {session.status !== "completed" && <button type="button" onClick={() => { setCompletionError(""); setConfirmOpen(true); }} disabled={completing} className="inline-flex min-h-10 w-full items-center justify-center rounded-xl theme-primary-button px-4 py-2.5 text-sm font-bold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-60 sm:w-auto">Complete Interview</button>}
+          {session.status === "completed" && <Link to={`/results/${encodeURIComponent(sessionId)}`} className="inline-flex min-h-10 w-full shrink-0 items-center justify-center rounded-xl theme-primary-button px-4 py-2.5 text-sm font-semibold theme-text-primary shadow-sm transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring sm:w-auto">View evaluation</Link>}
           <Link to={backPath} className="inline-flex min-h-10 w-full shrink-0 items-center justify-center rounded-xl border theme-border px-4 py-2.5 text-sm font-semibold theme-text-primary transition theme-hover-border theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring sm:w-auto">{backLabel}</Link>
         </div>
       </header>

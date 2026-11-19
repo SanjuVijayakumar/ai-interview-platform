@@ -11,6 +11,14 @@ const DIFFICULTIES = new Set(["Beginner", "Intermediate", "Advanced"]);
 const ALLOWED_FIELDS = new Set(["count", "difficulty", "category"]);
 
 export const generateQuestions = async (req, res) => {
+  const requestAbortController = new AbortController();
+  const abortOnRequestAbort = () => requestAbortController.abort();
+  const abortOnResponseClose = () => {
+    if (!res.writableEnded) requestAbortController.abort();
+  };
+  req.once("aborted", abortOnRequestAbort);
+  res.once("close", abortOnResponseClose);
+  if (req.aborted || (res.destroyed && !res.writableEnded)) requestAbortController.abort();
   try {
     const { interviewId } = req.params;
     if (!mongoose.isValidObjectId(interviewId)) {
@@ -54,10 +62,11 @@ export const generateQuestions = async (req, res) => {
       },
       interview: { title: interview.title, category: interview.category, difficulty: interview.difficulty },
       preferences: { count: body.count, difficulty, category },
-    });
+    }, { signal: requestAbortController.signal });
 
     return res.status(200).json({ success: true, interviewId: interview._id.toString(), questions });
   } catch (error) {
+    if (requestAbortController.signal.aborted) return;
     if (error instanceof AIQuestionConfigurationError) {
       return res.status(503).json({ success: false, message: error.message });
     }
@@ -74,5 +83,8 @@ export const generateQuestions = async (req, res) => {
       return res.status(502).json({ success: false, message: error.message });
     }
     return res.status(500).json({ success: false, message: "Failed to generate interview questions." });
+  } finally {
+    req.removeListener("aborted", abortOnRequestAbort);
+    res.removeListener("close", abortOnResponseClose);
   }
 };
