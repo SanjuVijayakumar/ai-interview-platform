@@ -100,9 +100,8 @@ export async function createAIAdapter({ apiKey, model, timeoutMs, client: inject
               ...(requestTimeout ? {
                 httpOptions: {
                   timeout: remainingTimeout,
-                  ...(retry503 ? { retryOptions: { attempts: 1, httpStatusCodes: [503] } } : {}),
                 },
-              } : retry503 ? { httpOptions: { retryOptions: { attempts: 1, httpStatusCodes: [503] } } } : {}),
+              } : {}),
             },
           });
           break;

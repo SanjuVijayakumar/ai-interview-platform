@@ -98,6 +98,31 @@ test("passes the existing evaluation prompt, dynamic schema, output limit, and t
     ["technicalAccuracy", "relevance", "completeness", "clarity"]);
   assert.equal(requests[0].maxOutputTokens, 2500);
   assert.equal(requests[0].timeoutMs, 4321);
+  assert.match(requests[0].correlationId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  assert.equal(requests[0].signal, undefined);
+});
+
+test("provider failures retain their safe evaluation correlation ID", async () => {
+  let correlationId;
+  const provider = {
+    model: "mock-model",
+    timeoutMs: 1000,
+    generate: async (request) => {
+      correlationId = request.correlationId;
+      throw new AIProviderError("timeout", "private provider message", {
+        provider: "gemini",
+        errorCategory: "timeout",
+        correlationId,
+        timeoutMs: request.timeoutMs,
+      });
+    },
+  };
+  await assert.rejects(evaluateInterviewSession(session([answer("correlated-failure")]), { provider }), (error) => {
+    assert.equal(error.code, "timeout");
+    assert.equal(error.diagnostics.correlationId, correlationId);
+    assert.equal(error.message.includes("private provider message"), false);
+    return true;
+  });
 });
 
 test("unanswered questions contribute zero and all unanswered sessions avoid AI", async () => {
@@ -231,6 +256,58 @@ test("evaluates more than one batch and rejects the whole run when a later batch
     return { text: JSON.stringify({ evaluations: target.map((entry) => makeItem({ question: entry.questionId, category: entry.category })) }), model: "mock" };
   } };
   await assert.rejects(evaluateInterviewSession(session(many), { model: "mock", provider: duplicateAcrossChunks }), EvaluationError);
+});
+
+test("shares one evaluation deadline across batches and passes only remaining time", async () => {
+  const originalNow = Date.now;
+  let now = 1000;
+  Date.now = () => now;
+  const requests = [];
+  const q = Array.from({ length: 11 }, (_, i) => answer(`deadline-${i}`));
+  const provider = fakeProvider((entry) => makeItem({ question: entry.questionId, category: entry.category }), requests);
+  provider.timeoutMs = 100;
+  provider.generate = async (request) => {
+    requests.push(request);
+    const payload = JSON.parse(request.userPrompt.slice(request.userPrompt.indexOf("\n") + 1));
+    if (requests.length === 1) now += 60;
+    return {
+      text: JSON.stringify({ evaluations: payload.map((entry) => makeItem({ question: entry.questionId, category: entry.category })) }),
+      model: "gemini-mock-model",
+    };
+  };
+  try {
+    await evaluateInterviewSession(session(q), { provider });
+  } finally {
+    Date.now = originalNow;
+  }
+  assert.deepEqual(requests.map(({ timeoutMs }) => timeoutMs), [100, 40]);
+  assert.equal(requests[0].correlationId, requests[1].correlationId);
+});
+
+test("does not start a later evaluation batch after the overall deadline expires", async () => {
+  const originalNow = Date.now;
+  let now = 1000;
+  Date.now = () => now;
+  const requests = [];
+  const q = Array.from({ length: 11 }, (_, i) => answer(`expired-${i}`));
+  const provider = fakeProvider((entry) => makeItem({ question: entry.questionId, category: entry.category }), requests);
+  provider.timeoutMs = 100;
+  provider.generate = async (request) => {
+    requests.push(request);
+    const payload = JSON.parse(request.userPrompt.slice(request.userPrompt.indexOf("\n") + 1));
+    now += 100;
+    return {
+      text: JSON.stringify({ evaluations: payload.map((entry) => makeItem({ question: entry.questionId, category: entry.category })) }),
+      model: "gemini-mock-model",
+    };
+  };
+  try {
+    await assert.rejects(evaluateInterviewSession(session(q), { provider }), { code: "timeout" });
+  } finally {
+    Date.now = originalNow;
+  }
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].timeoutMs, 100);
 });
 
 test("rejects excessive input and provider failures with safe errors", async () => {

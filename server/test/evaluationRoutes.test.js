@@ -90,7 +90,12 @@ async function withApi(t, { session = makeSession(), beforeClaim, findOne } = {}
     });
     return { status: response.status, body: await response.json() };
   };
-  return { request, get claimFilter() { return claimFilter; }, get claimCount() { return claimCount; } };
+  return {
+    request,
+    get claimFilter() { return claimFilter; },
+    get claimCount() { return claimCount; },
+    get storedSession() { return current; },
+  };
 }
 
 const evaluationPath = `/api/mock-sessions/${sessionId}/evaluation`;
@@ -201,6 +206,7 @@ test("failed evaluations require explicit retry and retry claims only failed res
   assert.equal(first.status, 502);
   assert.equal(first.body.status, "failed");
   assert.equal(first.body.attemptCount, 1);
+  assert.equal(api.storedSession.evaluationStatus, "failed");
 
   const noRetry = await api.request(evaluationPath, { method: "POST", body: { retry: false } });
   assert.equal(noRetry.status, 409);

@@ -1,4 +1,6 @@
-import { getAIProvider } from "../config/aiProvider.js";
+import { randomUUID } from "node:crypto";
+import { DEFAULT_TIMEOUT_MS, getAIProvider } from "../config/aiProvider.js";
+import { logProviderFailure } from "./aiProviders/normalizeProviderError.js";
 import { selectEvaluationRubric, RUBRIC_VERSION } from "./evaluationRubrics.js";
 import mongoose from "mongoose";
 
@@ -14,10 +16,11 @@ const DIMENSION_LABELS = {
 };
 
 export class EvaluationError extends Error {
-  constructor(code, message) {
+  constructor(code, message, diagnostics) {
     super(message);
     this.name = "EvaluationError";
     this.code = code;
+    if (diagnostics) this.diagnostics = diagnostics;
   }
 }
 
@@ -82,20 +85,30 @@ function validateBatch(value, questions) {
 
 function providerFailure(error) {
   if (error instanceof EvaluationError) return error;
-  if (error?.code === "configuration") return new EvaluationError("configuration", "The evaluation service is not configured.");
-  if (error?.code === "rate_limited") return new EvaluationError("rate_limited", "The evaluation service is rate limited. Please try again shortly.");
-  if (error?.code === "quota_exhausted") return new EvaluationError("quota_exhausted", "The evaluation provider quota is exhausted.");
-  if (error?.code === "timeout") return new EvaluationError("timeout", "The evaluation request timed out.");
-  if (error?.code === "refused") return new EvaluationError("refused", "The evaluation request could not be completed.");
-  if (error?.code === "incomplete_output") return new EvaluationError("incomplete_output", "The evaluation response was incomplete.");
-  if (error?.code === "invalid_output") return new EvaluationError("invalid_output", "The evaluation service returned an invalid response.");
-  if (error?.code === "provider_unavailable") return new EvaluationError("provider_unavailable", "The evaluation service is temporarily unavailable.");
-  if (error?.status === 429) return new EvaluationError("rate_limited", "The evaluation service is rate limited. Please try again shortly.");
-  if (error?.name === "APIConnectionTimeoutError" || error?.code === "ETIMEDOUT" || error?.name === "TimeoutError") return new EvaluationError("timeout", "The evaluation request timed out.");
-  return new EvaluationError("provider_unavailable", "The evaluation service is temporarily unavailable.");
+  const diagnostics = error?.diagnostics;
+  if (error?.code === "configuration") return new EvaluationError("configuration", "The evaluation service is not configured.", diagnostics);
+  if (error?.code === "rate_limited") return new EvaluationError("rate_limited", "The evaluation service is rate limited. Please try again shortly.", diagnostics);
+  if (error?.code === "quota_exhausted") return new EvaluationError("quota_exhausted", "The evaluation provider quota is exhausted.", diagnostics);
+  if (error?.code === "timeout") return new EvaluationError("timeout", "The evaluation request timed out.", diagnostics);
+  if (error?.code === "refused") return new EvaluationError("refused", "The evaluation request could not be completed.", diagnostics);
+  if (error?.code === "incomplete_output") return new EvaluationError("incomplete_output", "The evaluation response was incomplete.", diagnostics);
+  if (error?.code === "invalid_output") return new EvaluationError("invalid_output", "The evaluation service returned an invalid response.", diagnostics);
+  if (error?.code === "provider_unavailable") return new EvaluationError("provider_unavailable", "The evaluation service is temporarily unavailable.", diagnostics);
+  if (error?.status === 429) return new EvaluationError("rate_limited", "The evaluation service is rate limited. Please try again shortly.", diagnostics);
+  if (error?.name === "APIConnectionTimeoutError" || error?.code === "ETIMEDOUT" || error?.name === "TimeoutError") return new EvaluationError("timeout", "The evaluation request timed out.", diagnostics);
+  return new EvaluationError("provider_unavailable", "The evaluation service is temporarily unavailable.", diagnostics);
 }
 
-async function evaluateChunk(provider, model, questions) {
+function evaluationTimeoutError({ provider, model, timeoutMs, correlationId }) {
+  const diagnostics = { provider: provider?.provider, model, timeoutMs, correlationId, errorCategory: "timeout" };
+  logProviderFailure(diagnostics);
+  return new EvaluationError("timeout", "The evaluation request timed out.", diagnostics);
+}
+
+async function evaluateChunk(provider, model, questions, { timeoutMs, deadline, correlationId }) {
+  if (Date.now() >= deadline) {
+    throw evaluationTimeoutError({ provider, model, timeoutMs, correlationId });
+  }
   const promptData = questions.map(({ id, answer, rubric }) => ({
     questionId: id, questionText: answer.questionText, category: answer.category, difficulty: answer.difficulty,
     candidateAnswer: answer.answerText, referenceAnswer: answer.referenceAnswerSnapshot || null,
@@ -109,9 +122,18 @@ async function evaluateChunk(provider, model, questions) {
       userPrompt: `Evaluate exactly these questions. Return one evaluation per question ID, with all rubric dimensions.\n${JSON.stringify(promptData)}`,
       responseSchema: outputSchema(questions),
       maxOutputTokens: Math.min(12000, 1500 + questions.length * 1000),
-      timeoutMs: provider.timeoutMs,
+      timeoutMs,
+      correlationId,
     });
-  } catch (error) { throw providerFailure(error); }
+  } catch (error) {
+    if (Date.now() >= deadline) {
+      throw evaluationTimeoutError({ provider, model, timeoutMs, correlationId });
+    }
+    throw providerFailure(error);
+  }
+  if (Date.now() >= deadline) {
+    throw evaluationTimeoutError({ provider, model, timeoutMs, correlationId });
+  }
   if (response?.incomplete) throw new EvaluationError("incomplete_output", "The evaluation response was incomplete.");
   if (response?.refused) throw new EvaluationError("refused", "The evaluation request could not be completed.");
   if (typeof response?.text !== "string" || !response.text.trim()) throw new EvaluationError("invalid_output", "The evaluation service returned an invalid response.");
@@ -163,6 +185,8 @@ function summarize(evaluated, answers) {
 
 /** Evaluates a completed session in memory and returns a fully validated patch-ready result. */
 export async function evaluateInterviewSession(session, options = {}) {
+  const evaluationStartedAt = Date.now();
+  const correlationId = randomUUID();
   const answersInput = session?.answers;
   if (!Array.isArray(answersInput) || answersInput.length === 0 || answersInput.length > MAX_EVALUATION_QUESTIONS ||
       answersInput.length !== session.totalQuestions) throw new EvaluationError("invalid_input", "The session question set is invalid or exceeds evaluation limits.");
@@ -190,9 +214,21 @@ export async function evaluateInterviewSession(session, options = {}) {
     catch (error) { throw providerFailure(error); }
   }
   model ||= provider?.model;
+  const overallTimeoutMs = Number.isSafeInteger(provider?.timeoutMs) && provider.timeoutMs > 0
+    ? provider.timeoutMs
+    : DEFAULT_TIMEOUT_MS;
+  const deadline = evaluationStartedAt + overallTimeoutMs;
   const validated = [];
   for (let index = 0; index < answered.length; index += MAX_BATCH_QUESTIONS) {
-    const batch = await evaluateChunk(provider, model, answered.slice(index, index + MAX_BATCH_QUESTIONS));
+    const remainingTimeoutMs = Math.max(0, deadline - Date.now());
+    if (remainingTimeoutMs === 0) {
+      throw evaluationTimeoutError({ provider, model, timeoutMs: overallTimeoutMs, correlationId });
+    }
+    const batch = await evaluateChunk(provider, model, answered.slice(index, index + MAX_BATCH_QUESTIONS), {
+      timeoutMs: remainingTimeoutMs,
+      deadline,
+      correlationId,
+    });
     model = batch.model || model;
     validated.push(...batch.evaluations);
   }

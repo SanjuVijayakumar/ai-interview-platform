@@ -168,7 +168,7 @@ test("question generation returns on a successful first attempt without waiting"
   assert.equal(result.text, '{"answer":"ok"}');
   assert.equal(mock.requests.length, 1);
   assert.deepEqual(delays, []);
-  assert.deepEqual(mock.requests[0].config.httpOptions.retryOptions, { attempts: 1, httpStatusCodes: [503] });
+  assert.equal(mock.requests[0].config.httpOptions.retryOptions, undefined);
   assert.equal(mock.requests[0].config.httpOptions.timeout, params.timeoutMs);
 });
 
@@ -189,6 +189,7 @@ test("two 503 UNAVAILABLE errors retry after 2 and 4 seconds before succeeding",
   await adapter.generate({ ...params, retry503: true });
   assert.equal(mock.requests.length, 3);
   assert.deepEqual(delays, [2000, 4000]);
+  assert.ok(mock.requests.every(({ config }) => config.httpOptions.retryOptions === undefined));
 });
 
 test("three consecutive 503 UNAVAILABLE errors stop after three total attempts", async () => {
