@@ -51,8 +51,8 @@ test("uses Gemini by default through the provider factory and preserves successf
   assert.deepEqual(questions, validQuestions);
 });
 
-test("supports explicitly selected Gemini and optional OpenAI adapters through the same interface", async () => {
-  for (const provider of ["gemini", "openai"]) {
+test("supports explicitly selected Gemini, OpenAI, and Groq adapters through the same interface", async () => {
+  for (const provider of ["gemini", "openai", "groq"]) {
     const fake = fakeProvider({ provider });
     const questions = await generateInterviewQuestions(input, { providerFactory: fake.providerFactory });
     assert.equal(questions.length, input.preferences.count);

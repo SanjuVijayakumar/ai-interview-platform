@@ -10,12 +10,12 @@ export class AIProviderConfigurationError extends Error {
 
 export function readAIProviderConfiguration(env = process.env) {
   const provider = String(env.AI_PROVIDER ?? "gemini").trim().toLowerCase();
-  if (provider !== "gemini" && provider !== "openai") {
-    throw new AIProviderConfigurationError("AI_PROVIDER must be gemini or openai.");
+  if (provider !== "gemini" && provider !== "openai" && provider !== "groq") {
+    throw new AIProviderConfigurationError("AI_PROVIDER must be gemini, openai, or groq.");
   }
 
-  const keyName = provider === "gemini" ? "GEMINI_API_KEY" : "OPENAI_API_KEY";
-  const modelName = provider === "gemini" ? "GEMINI_MODEL" : "OPENAI_MODEL";
+  const keyName = provider === "gemini" ? "GEMINI_API_KEY" : provider === "openai" ? "OPENAI_API_KEY" : "GROQ_API_KEY";
+  const modelName = provider === "gemini" ? "GEMINI_MODEL" : provider === "openai" ? "OPENAI_MODEL" : "GROQ_MODEL";
   const apiKey = typeof env[keyName] === "string" ? env[keyName].trim() : "";
   const model = typeof env[modelName] === "string" ? env[modelName].trim() : "";
   if (!apiKey) throw new AIProviderConfigurationError(`${keyName} is required for the selected AI provider.`);
@@ -40,6 +40,8 @@ export async function getAIProvider({ env = process.env, adapterLoader } = {}) {
     adapterModule = await adapterLoader(configuration.provider);
   } else if (configuration.provider === "gemini") {
     adapterModule = await import("../services/aiProviders/geminiAdapter.js");
+  } else if (configuration.provider === "groq") {
+    adapterModule = await import("../services/aiProviders/groqAdapter.js");
   } else {
     adapterModule = await import("../services/aiProviders/openaiAdapter.js");
   }

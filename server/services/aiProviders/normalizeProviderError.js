@@ -62,12 +62,12 @@ function safeProviderCode(error) {
 function safeDiagnostics(error, { provider, timeoutMs, model, correlationId, attempt, maxAttempts, willRetry } = {}, errorCategory) {
   const errorName = SAFE_ERROR_NAMES.has(error?.name) ? error.name : "Error";
   const diagnostics = {
-    provider: provider === "gemini" || provider === "openai" ? provider : "unknown",
+    provider: provider === "gemini" || provider === "openai" || provider === "groq" ? provider : "unknown",
     errorName,
     httpStatus: httpStatusFrom(error),
     errorCategory: Object.hasOwn(SAFE_MESSAGES, errorCategory) ? errorCategory : "provider_unavailable",
     timeoutMs: Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 300000 ? timeoutMs : undefined,
-    model: typeof model === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{1,80}$/.test(model) ? model : undefined,
+    model: typeof model === "string" && /^[A-Za-z0-9][A-Za-z0-9._/-]{1,80}$/.test(model) ? model : undefined,
     providerCode: safeProviderCode(error),
     correlationId: typeof correlationId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(correlationId) ? correlationId : undefined,
     attempt: Number.isInteger(attempt) && attempt >= 1 && attempt <= 3 ? attempt : undefined,
@@ -145,7 +145,7 @@ export function normalizeProviderError(error, { timeoutMs, provider, model } = {
       category = "rate_limited";
     } else if (/quota.{0,30}(exhaust|exceed|limit)|billing|free.?tier|daily limit|monthly limit|resource_exhausted/.test(details)) {
       category = "quota_exhausted";
-    } else if (provider === "openai") {
+    } else if (provider === "openai" || provider === "groq") {
       category = "rate_limited";
     } else {
       // Ambiguous 429s may be quota or throttling; do not assume a retry will help.

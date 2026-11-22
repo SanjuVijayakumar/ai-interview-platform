@@ -85,6 +85,50 @@ test("uses the Gemini default provider without OpenAI credentials", async () => 
   assert.equal(result.persistencePayload.evaluationModel, "gemini-mock-model");
 });
 
+test("evaluates answers through the selected Groq provider with the existing result contract", async () => {
+  const loadedProviders = [];
+  const requests = [];
+  const result = await evaluateInterviewSession(session([answer("groq-evaluation")]), {
+    providerFactory: () => getAIProvider({
+      env: { AI_PROVIDER: "groq", GROQ_API_KEY: "mock-groq-key", GROQ_MODEL: "openai/gpt-oss-20b" },
+      adapterLoader: async (provider) => {
+        loadedProviders.push(provider);
+        return {
+          createAIAdapter: async (configuration) => ({
+            provider: "groq",
+            model: configuration.model,
+            timeoutMs: configuration.timeoutMs,
+            async generate(request) {
+              requests.push(request);
+              const payload = JSON.parse(request.userPrompt.slice(request.userPrompt.indexOf("\n") + 1));
+              return {
+                text: JSON.stringify({
+                  evaluations: payload.map((entry) => makeItem({
+                    question: entry.questionId,
+                    questionText: entry.questionText,
+                    category: entry.category,
+                  })),
+                }),
+                model: configuration.model,
+                provider: "groq",
+                refused: false,
+                incomplete: false,
+              };
+            },
+          }),
+        };
+      },
+    }),
+  });
+
+  assert.deepEqual(loadedProviders, ["groq"]);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].responseSchema.properties.evaluations.type, "array");
+  assert.equal(result.persistencePayload.evaluationModel, "openai/gpt-oss-20b");
+  assert.equal(result.clientPayload.answers.length, 1);
+  assert.equal(Object.hasOwn(result.clientPayload.answers[0], "referenceAnswerUsed"), false);
+});
+
 test("passes the existing evaluation prompt, dynamic schema, output limit, and timeout to the provider", async () => {
   const requests = [];
   const q = answer("provider-arguments");
