@@ -10,6 +10,7 @@ import questionRoutes from "./routes/questionRoutes.js";
 import resultRoutes from "./routes/resultRoutes.js";
 import aiQuestionRoutes from "./routes/aiQuestionRoutes.js";
 import mockSessionRoutes from "./routes/mockSessionRoutes.js";
+import dashboardRoutes from "./routes/dashboardRoutes.js";
 
 
 dotenv.config();
@@ -44,6 +45,7 @@ app.use("/api/interviews", aiQuestionRoutes);
 app.use("/api/questions", questionRoutes);
 app.use("/api/results", resultRoutes);
 app.use("/api", mockSessionRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 
 app.post("/api/test-user", async (req, res) => {
   try {

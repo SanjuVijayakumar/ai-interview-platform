@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { getAuthToken } from "../services/authService.js";
-
-const INTERVIEWS_URL = "http://localhost:5000/api/interviews";
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { logoutUser } from "../services/authService.js";
+import { getDashboardStats } from "../services/dashboardService.js";
+import { getInterviews } from "../services/interviewService.js";
 
 const statDefinitions = [
   {
@@ -49,58 +49,86 @@ function formatStatus(status) {
   return status.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function formatAverageScore(score) {
+  if (score === null) return "—";
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(score);
+}
+
 function DashboardPage({ user }) {
+  const navigate = useNavigate();
+  const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState("");
+  const [statsRetry, setStatsRetry] = useState(0);
   const [interviews, setInterviews] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [interviewsLoading, setInterviewsLoading] = useState(true);
+  const [interviewsError, setInterviewsError] = useState("");
+  const [interviewsRetry, setInterviewsRetry] = useState(0);
+  const authenticationRedirected = useRef(false);
   const firstName = user?.name?.trim().split(/\s+/)[0];
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function loadInterviews() {
-      const token = getAuthToken();
-      if (!token) {
-        setError("Your session is missing. Please sign in again to view your dashboard.");
-        setLoading(false);
-        return;
-      }
-
+    let active = true;
+    async function loadStats() {
+      setStatsLoading(true);
+      setStatsError("");
       try {
-        const response = await fetch(INTERVIEWS_URL, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const data = await response.json().catch(() => ({}));
-
-        if (!response.ok) {
-          throw new Error(data.message || "We couldn't load your interviews. Please try again.");
-        }
-        if (!Array.isArray(data.interviews)) {
-          throw new Error("The interviews response was not in the expected format.");
-        }
-
-        if (!cancelled) {
-          setInterviews(data.interviews);
-          setError("");
-        }
+        const result = await getDashboardStats();
+        if (active) setStats(result);
       } catch (requestError) {
-        if (!cancelled) setError(requestError.message || "We couldn't load your interviews. Please try again.");
+        if (!active) return;
+        if (requestError.status === 401) {
+          if (!authenticationRedirected.current) {
+            authenticationRedirected.current = true;
+            logoutUser();
+            navigate("/login", { replace: true });
+          }
+          return;
+        }
+        setStatsError(requestError.message || "We couldn't load your dashboard statistics. Please try again.");
       } finally {
-        if (!cancelled) setLoading(false);
+        if (active) setStatsLoading(false);
       }
     }
 
-    loadInterviews();
-    return () => { cancelled = true; };
-  }, []);
+    loadStats();
+    return () => { active = false; };
+  }, [navigate, statsRetry]);
 
-  const completedCount = interviews.filter((interview) => interview.status === "completed").length;
-  const pendingCount = interviews.filter((interview) => interview.status === "scheduled" || interview.status === "in-progress").length;
+  useEffect(() => {
+    let active = true;
+    async function loadInterviewHistory() {
+      setInterviewsLoading(true);
+      setInterviewsError("");
+      try {
+        const items = await getInterviews();
+        if (active) setInterviews(items);
+      } catch (requestError) {
+        if (!active) return;
+        if (requestError.status === 401) {
+          if (!authenticationRedirected.current) {
+            authenticationRedirected.current = true;
+            logoutUser();
+            navigate("/login", { replace: true });
+          }
+          return;
+        }
+        setInterviewsError(requestError.message || "We couldn't load your interviews. Please try again.");
+      } finally {
+        if (active) setInterviewsLoading(false);
+      }
+    }
+
+    loadInterviewHistory();
+    return () => { active = false; };
+  }, [interviewsRetry, navigate]);
+
+  const statsUnavailable = Boolean(statsError) || !stats;
   const statValues = [
-    { value: loading ? "…" : error ? "—" : interviews.length, note: error ? "Unavailable" : loading ? "Loading your interviews" : "From your interview history" },
-    { value: loading ? "…" : error ? "—" : completedCount, note: error ? "Unavailable" : "Marked completed" },
-    { value: loading ? "…" : error ? "—" : pendingCount, note: error ? "Unavailable" : "Scheduled or in progress" },
-    { value: "—", note: "Score data isn't available from a user-scoped endpoint" },
+    { value: statsLoading ? "…" : statsUnavailable ? "—" : stats.totalInterviews, note: statsLoading ? "Loading your statistics" : statsUnavailable ? "Unavailable" : "From your interview history" },
+    { value: statsLoading ? "…" : statsUnavailable ? "—" : stats.completedInterviews, note: statsLoading ? "Loading your statistics" : statsUnavailable ? "Unavailable" : "Completed mock-session activity" },
+    { value: statsLoading ? "…" : statsUnavailable ? "—" : stats.pendingInterviews, note: statsLoading ? "Loading your statistics" : statsUnavailable ? "Unavailable" : "Without a completed mock session" },
+    { value: statsLoading ? "…" : statsUnavailable ? "—" : formatAverageScore(stats.averageScore), note: statsLoading ? "Loading your statistics" : statsUnavailable ? "Unavailable" : "Across completed AI evaluations" },
   ];
   const recentInterviews = [...interviews]
     .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
@@ -128,7 +156,7 @@ function DashboardPage({ user }) {
             <h2 id="stats-heading" className="mb-1 font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">Your progress</h2>
             <p className="mb-0 text-sm theme-text-secondary">A snapshot of your interview practice.</p>
           </div>
-          <span className="rounded-full border theme-border theme-card-surface px-3 py-1 text-xs font-medium theme-text-secondary">{loading ? "Updating from your account" : "Based on your interview history"}</span>
+          <span className="rounded-full border theme-border theme-card-surface px-3 py-1 text-xs font-medium theme-text-secondary">{statsLoading ? "Updating from your account" : "Based on your interview history"}</span>
         </div>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -145,6 +173,12 @@ function DashboardPage({ user }) {
             </article>
           ))}
         </div>
+        {statsError && (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border theme-border-error theme-error-surface px-4 py-3" role="alert">
+            <p className="mb-0 text-sm theme-text-error">{statsError}</p>
+            <button type="button" onClick={() => setStatsRetry((count) => count + 1)} className="rounded-lg border theme-border theme-card-surface px-3 py-2 text-sm font-semibold theme-text-primary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Retry statistics</button>
+          </div>
+        )}
       </section>
 
       <section className="overflow-hidden rounded-2xl border theme-border theme-card-surface shadow-sm" aria-labelledby="recent-heading">
@@ -159,15 +193,15 @@ function DashboardPage({ user }) {
           </Link>
         </div>
 
-        {loading ? (
+        {interviewsLoading ? (
           <div className="flex min-h-56 items-center justify-center gap-3 px-5 text-sm theme-text-secondary" role="status">
             <span className="h-5 w-5 animate-spin rounded-full border-2 theme-border-highlight theme-spinner-active" />
             Loading your interviews…
           </div>
-        ) : error ? (
+        ) : interviewsError ? (
           <div className="px-5 py-10 text-center sm:px-8" role="alert">
-            <p className="mx-auto mb-4 max-w-xl rounded-xl border theme-border-error theme-error-surface px-4 py-3 text-sm theme-text-error">{error}</p>
-            <button type="button" onClick={() => window.location.reload()} className="rounded-lg border theme-border theme-card-surface px-4 py-2 text-sm font-semibold theme-text-primary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Reload dashboard</button>
+            <p className="mx-auto mb-4 max-w-xl rounded-xl border theme-border-error theme-error-surface px-4 py-3 text-sm theme-text-error">{interviewsError}</p>
+            <button type="button" onClick={() => setInterviewsRetry((count) => count + 1)} className="rounded-lg border theme-border theme-card-surface px-4 py-2 text-sm font-semibold theme-text-primary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Reload interviews</button>
           </div>
         ) : recentInterviews.length === 0 ? (
           <div className="flex flex-col items-center px-5 py-10 text-center sm:px-8 sm:py-14">
