@@ -47,12 +47,18 @@ test("rejects empty and malformed JSON output", async () => {
 });
 
 test("normalizes OpenAI request failures without leaking messages", async () => {
-  const adapter = await createAIAdapter({ apiKey: "x", model: "m", client: mockClient(async () => { throw { status: 429, message: "secret provider detail" }; }).client });
-  await assert.rejects(adapter.generate(params), (error) => {
-    assert.equal(error.code, "rate_limited");
-    assert.equal(error.message.includes("secret provider detail"), false);
-    return true;
-  });
+  for (const [failure, expectedCode] of [
+    [{ status: 400, message: "secret provider detail" }, "provider_unavailable"],
+    [{ status: 429, message: "secret provider detail" }, "rate_limited"],
+  ]) {
+    const adapter = await createAIAdapter({ apiKey: "x", model: "m", client: mockClient(async () => { throw failure; }).client });
+    await assert.rejects(adapter.generate(params), (error) => {
+      assert.equal(error.code, expectedCode);
+      assert.equal(error.message.includes("secret provider detail"), false);
+      assert.equal(error.diagnostics.providerErrorType, undefined);
+      return true;
+    });
+  }
 });
 
 test("logs provider failure diagnostics with correlation ID and attempt count", async () => {

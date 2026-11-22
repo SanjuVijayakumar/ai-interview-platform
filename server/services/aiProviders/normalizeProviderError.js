@@ -1,5 +1,6 @@
 const SAFE_MESSAGES = {
   configuration: "AI provider configuration is invalid or unavailable.",
+  invalid_request: "The AI provider rejected the request.",
   rate_limited: "The AI service is rate limited. Please try again shortly.",
   quota_exhausted: "The AI provider quota is exhausted.",
   provider_unavailable: "The AI service is temporarily unavailable.",
@@ -18,6 +19,7 @@ const SAFE_PROVIDER_CODES = new Set([
   "BILLING_NOT_ENABLED", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN",
   "ETIMEDOUT", "EHOSTUNREACH", "ECONNABORTED",
 ]);
+const SAFE_GROQ_ERROR_TYPES = new Set(["invalid_request_error"]);
 const SAFE_ERROR_NAMES = new Set([
   "ApiError", "GoogleGenAiError", "APIConnectionTimeoutError", "APIConnectionError",
   "APIUserAbortError", "RequestTimeoutError", "RequestAbortedError", "ConnectionError",
@@ -59,7 +61,13 @@ function safeProviderCode(error) {
   return found[0];
 }
 
-function safeDiagnostics(error, { provider, timeoutMs, model, correlationId, attempt, maxAttempts, willRetry } = {}, errorCategory) {
+function safeGroqErrorType(error, provider, suppliedType) {
+  if (provider !== "groq") return undefined;
+  const type = suppliedType ?? error?.error?.type ?? error?.type;
+  return typeof type === "string" && SAFE_GROQ_ERROR_TYPES.has(type) ? type : undefined;
+}
+
+function safeDiagnostics(error, { provider, timeoutMs, model, providerErrorType, correlationId, attempt, maxAttempts, willRetry } = {}, errorCategory) {
   const errorName = SAFE_ERROR_NAMES.has(error?.name) ? error.name : "Error";
   const diagnostics = {
     provider: provider === "gemini" || provider === "openai" || provider === "groq" ? provider : "unknown",
@@ -69,6 +77,7 @@ function safeDiagnostics(error, { provider, timeoutMs, model, correlationId, att
     timeoutMs: Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 300000 ? timeoutMs : undefined,
     model: typeof model === "string" && /^[A-Za-z0-9][A-Za-z0-9._/-]{1,80}$/.test(model) ? model : undefined,
     providerCode: safeProviderCode(error),
+    providerErrorType: safeGroqErrorType(error, provider, providerErrorType),
     correlationId: typeof correlationId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(correlationId) ? correlationId : undefined,
     attempt: Number.isInteger(attempt) && attempt >= 1 && attempt <= 3 ? attempt : undefined,
     maxAttempts: Number.isInteger(maxAttempts) && maxAttempts >= 1 && maxAttempts <= 3 ? maxAttempts : undefined,
@@ -136,6 +145,8 @@ export function normalizeProviderError(error, { timeoutMs, provider, model } = {
       error?.name === "TimeoutError" || error?.name === "APIConnectionTimeoutError" ||
       (error?.name === "AbortError" && timeoutMs)) {
     category = "timeout";
+  } else if (provider === "groq" && status === 400) {
+    category = "invalid_request";
   } else if (status === 401 || status === 403 || /api[_ -]?key[_ -]?invalid|invalid api key|unauthenticated|authentication|permission denied/.test(details)) {
     category = "configuration";
   } else if (/model[^\n]*(not found|invalid|unsupported|does not exist)|unsupported model/.test(details) || status === 404) {
@@ -168,6 +179,7 @@ export function logProviderFailure(diagnostics) {
       provider: diagnostics?.provider,
       timeoutMs: diagnostics?.timeoutMs,
       model: diagnostics?.model,
+      providerErrorType: diagnostics?.providerErrorType,
       correlationId: diagnostics?.correlationId,
       attempt: diagnostics?.attempt,
       maxAttempts: diagnostics?.maxAttempts,

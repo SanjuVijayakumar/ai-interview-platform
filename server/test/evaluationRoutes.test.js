@@ -172,6 +172,27 @@ test("evaluation response retains public scores while omitting internal metadata
   }
 });
 
+test("failed invalid requests expose only the safe evaluation category", async (t) => {
+  const api = await withApi(t, {
+    session: makeSession({
+      evaluationStatus: "failed",
+      evaluationAttemptCount: 1,
+      evaluationErrorCode: "invalid_request",
+    }),
+  });
+  const response = await api.request(`/api/mock-sessions/${sessionId}/evaluation`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    success: true,
+    status: "failed",
+    attemptCount: 1,
+    errorCode: "invalid_request",
+    message: "Evaluation failed. You can retry this evaluation.",
+    retryAvailable: true,
+  });
+  assert.equal(api.claimCount, 0);
+});
+
 test("failed evaluations require explicit retry and retry claims only failed results", async (t) => {
   const previousProvider = process.env.AI_PROVIDER;
   const previousApiKey = process.env.OPENAI_API_KEY;

@@ -157,6 +157,8 @@ test("normalizes Groq HTTP failures and keeps namespaced model diagnostics", asy
     [{ status: 401, message: "invalid API key" }, "configuration"],
     [{ status: 403, message: "permission denied" }, "configuration"],
     [{ status: 404, message: "model not found" }, "configuration"],
+    [{ status: 400, error: { type: "invalid_request_error" } }, "invalid_request"],
+    [{ status: 400 }, "invalid_request"],
     [{ status: 429, message: "rate limit exceeded" }, "rate_limited"],
     [{ status: 429, message: "daily quota exceeded" }, "quota_exhausted"],
     [{ status: 500 }, "provider_unavailable"],
@@ -181,6 +183,46 @@ test("normalizes Groq HTTP failures and keeps namespaced model diagnostics", asy
       return true;
     });
     assert.equal(mock.calls.length, 1);
+  }
+});
+
+test("classifies Groq HTTP 400 as invalid_request and logs only an allowlisted error type", async () => {
+  const apiKey = "GROQ_SECRET_KEY_SENTINEL";
+  const correlationId = "a1b2c3d4-e5f6-4a1b-8c2d-3e4f5a6b7c8d";
+  const cases = [
+    [{ status: 400, error: { type: "invalid_request_error", message: `private ${apiKey}` } }, "invalid_request_error"],
+    [{ status: 400, error: { message: `private ${apiKey}` } }, undefined],
+    [{ status: 400, error: { type: `Bearer ${apiKey}`, message: `private ${apiKey}` } }, undefined],
+  ];
+
+  for (const [failure, expectedType] of cases) {
+    const mock = mockClient(async () => { throw failure; });
+    const adapter = await createAIAdapter({ apiKey, model: "openai/gpt-oss-20b", timeoutMs: 3000, client: mock.client });
+    const originalError = console.error;
+    const logs = [];
+    console.error = (line) => logs.push(line);
+    try {
+      await assert.rejects(adapter.generate({ ...params, correlationId }), (error) => {
+        assert.ok(error instanceof AIProviderError);
+        assert.equal(error.code, "invalid_request");
+        assert.equal(error.diagnostics.providerErrorType, expectedType);
+        assert.equal(error.diagnostics.correlationId, correlationId);
+        assert.equal(error.message.includes(apiKey), false);
+        return true;
+      });
+    } finally {
+      console.error = originalError;
+    }
+
+    assert.equal(mock.calls.length, 1);
+    assert.equal(logs.length, 1);
+    const diagnostic = JSON.parse(logs[0]);
+    assert.equal(diagnostic.errorCategory, "invalid_request");
+    assert.equal(diagnostic.httpStatus, 400);
+    assert.equal(diagnostic.providerErrorType, expectedType);
+    assert.equal(diagnostic.correlationId, correlationId);
+    assert.equal(logs.join(" ").includes(apiKey), false);
+    assert.equal(logs.join(" ").includes(failure.error?.message || ""), false);
   }
 });
 
