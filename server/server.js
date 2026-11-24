@@ -5,7 +5,6 @@ import dotenv from "dotenv";
 import connectDB from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
 import interviewRoutes from "./routes/interviewRoutes.js";
-import User from "./models/User.js";
 import questionRoutes from "./routes/questionRoutes.js";
 import resultRoutes from "./routes/resultRoutes.js";
 import aiQuestionRoutes from "./routes/aiQuestionRoutes.js";
@@ -46,33 +45,6 @@ app.use("/api/questions", questionRoutes);
 app.use("/api/results", resultRoutes);
 app.use("/api", mockSessionRoutes);
 app.use("/api/dashboard", dashboardRoutes);
-
-app.post("/api/test-user", async (req, res) => {
-  try {
-    let user = await User.findOne({
-      email: "testuser@example.com",
-    });
-
-    if (!user) {
-      user = await User.create({
-        name: "Test User",
-        email: "testuser@example.com",
-        password: "temporary-password-123",
-      });
-    }
-
-    res.status(201).json({
-      success: true,
-      message: "Test user created or already exists",
-      userId: user._id,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
 
 // Start server after connctng  to MongoDB
 const startServer = async () => {
