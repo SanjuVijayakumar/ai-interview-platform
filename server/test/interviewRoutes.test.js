@@ -6,6 +6,7 @@ import mongoose from "mongoose";
 import { createServer } from "node:http";
 import Interview from "../models/Interview.js";
 import InterviewResult from "../models/InterviewResult.js";
+import User from "../models/User.js";
 import interviewRoutes from "../routes/interviewRoutes.js";
 
 const testSecret = "interview-routes-test-secret-only";
@@ -62,6 +63,7 @@ async function withApi(t, { interviews = [], sessions = [] } = {}) {
     findOneAndUpdate: Interview.findOneAndUpdate,
     findOneAndDelete: Interview.findOneAndDelete,
     resultFind: InterviewResult.find,
+    userFindById: User.findById,
   };
   process.env.JWT_SECRET = testSecret;
 
@@ -107,6 +109,17 @@ async function withApi(t, { interviews = [], sessions = [] } = {}) {
       },
     };
   };
+  User.findById = (userId) => ({
+    select() {
+      return this;
+    },
+    lean() {
+      return Promise.resolve({
+        _id: new mongoose.Types.ObjectId(String(userId)),
+        role: "user",
+      });
+    },
+  });
 
   const app = express();
   app.use(express.json());
@@ -121,6 +134,7 @@ async function withApi(t, { interviews = [], sessions = [] } = {}) {
     Interview.findOneAndUpdate = originals.findOneAndUpdate;
     Interview.findOneAndDelete = originals.findOneAndDelete;
     InterviewResult.find = originals.resultFind;
+    User.findById = originals.userFindById;
     if (oldSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = oldSecret;
   });

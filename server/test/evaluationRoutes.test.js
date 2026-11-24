@@ -7,6 +7,7 @@ import { createServer } from "node:http";
 import mockSessionRoutes from "../routes/mockSessionRoutes.js";
 import resultRoutes from "../routes/resultRoutes.js";
 import InterviewResult from "../models/InterviewResult.js";
+import User from "../models/User.js";
 
 const userId = new mongoose.Types.ObjectId();
 const interviewId = new mongoose.Types.ObjectId();
@@ -44,11 +45,23 @@ async function withApi(t, { session = makeSession(), beforeClaim, findOne } = {}
   const originalFindOne = InterviewResult.findOne;
   const originalFindOneAndUpdate = InterviewResult.findOneAndUpdate;
   const originalFind = InterviewResult.find;
+  const originalUserFindById = User.findById;
   let claimFilter;
   let claimCount = 0;
   let current = session;
 
   InterviewResult.findOne = findOne || (async () => current);
+  User.findById = (userId) => ({
+    select() {
+      return this;
+    },
+    lean() {
+      return Promise.resolve({
+        _id: new mongoose.Types.ObjectId(String(userId)),
+        role: "user",
+      });
+    },
+  });
   InterviewResult.findOneAndUpdate = async (filter, update) => {
     if (filter.status === "completed") {
       claimFilter = filter;
@@ -77,6 +90,7 @@ async function withApi(t, { session = makeSession(), beforeClaim, findOne } = {}
     InterviewResult.findOne = originalFindOne;
     InterviewResult.findOneAndUpdate = originalFindOneAndUpdate;
     InterviewResult.find = originalFind;
+    User.findById = originalUserFindById;
     if (oldSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = oldSecret;
   });
@@ -244,6 +258,7 @@ test("failed evaluations require explicit retry and retry claims only failed res
 test("result collection and individual HTTP responses sanitize previously persisted metadata", async (t) => {
   const oldFind = InterviewResult.find;
   const oldFindOne = InterviewResult.findOne;
+  const oldUserFindById = User.findById;
   const oldSecret = process.env.JWT_SECRET;
   process.env.JWT_SECRET = testSecret;
   const persisted = InterviewResult.hydrate({
@@ -256,6 +271,17 @@ test("result collection and individual HTTP responses sanitize previously persis
   const query = (value) => ({ populate() { return this; }, sort() { return this; }, then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); } });
   InterviewResult.find = () => query([persisted]);
   InterviewResult.findOne = () => query(persisted);
+  User.findById = (userId) => ({
+    select() {
+      return this;
+    },
+    lean() {
+      return Promise.resolve({
+        _id: new mongoose.Types.ObjectId(String(userId)),
+        role: "user",
+      });
+    },
+  });
 
   const app = express();
   app.use("/api/results", resultRoutes);
@@ -265,6 +291,7 @@ test("result collection and individual HTTP responses sanitize previously persis
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     InterviewResult.find = oldFind;
     InterviewResult.findOne = oldFindOne;
+    User.findById = oldUserFindById;
     if (oldSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = oldSecret;
   });

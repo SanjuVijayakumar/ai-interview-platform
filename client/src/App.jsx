@@ -55,16 +55,11 @@ function AppRoutes({ healthMessage }) {
         <Route path="/results" element={<ResultsPage />} />
         <Route path="/results/:resultId" element={<EvaluationResultPage />} />
         <Route path="/mock-session/:sessionId" element={<MockSessionPage />} />
+        <Route
+          path="/profile"
+          element={<ProfilePage healthMessage={healthMessage} onLogout={handleLogout} />}
+        />
       </Route>
-
-      <Route
-        path="/profile"
-        element={
-          <ProtectedRoute token={token}>
-            <ProfilePage healthMessage={healthMessage} onLogout={handleLogout} />
-          </ProtectedRoute>
-        }
-      />
 
       <Route path="*" element={<Navigate to={token ? "/dashboard" : "/login"} replace />} />
     </Routes>

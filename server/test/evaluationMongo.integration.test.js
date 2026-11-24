@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import express from "express";
+import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import { createServer } from "node:http";
 import mockSessionRoutes from "../routes/mockSessionRoutes.js";
 import resultRoutes from "../routes/resultRoutes.js";
 import InterviewResult from "../models/InterviewResult.js";
+import User from "../models/User.js";
 
 const mongoTestUri = process.env.MONGO_TEST_URI;
 
@@ -21,6 +23,7 @@ test("MongoDB evaluation claims enforce BSON dates, ownership, eligibility, and 
   const secret = "mongo-route-test-secret-only";
   process.env.JWT_SECRET = secret;
   const createdIds = [];
+  const createdUserIds = [];
   await mongoose.connect(mongoTestUri);
   const app = express();
   app.use(express.json());
@@ -32,13 +35,24 @@ test("MongoDB evaluation claims enforce BSON dates, ownership, eligibility, and 
   t.after(async () => {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     if (createdIds.length) await InterviewResult.deleteMany({ _id: { $in: createdIds } });
+    if (createdUserIds.length) await User.deleteMany({ _id: { $in: createdUserIds } });
     await mongoose.disconnect();
     if (oldSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = oldSecret;
   });
 
-  const owner = new mongoose.Types.ObjectId();
-  const otherUser = new mongoose.Types.ObjectId();
+  const passwordHash = await bcrypt.hash("integration-test-password", 4);
+  async function createTestUser(label) {
+    const user = await User.create({
+      name: `Integration ${label}`,
+      email: `${label.toLowerCase()}-${new mongoose.Types.ObjectId()}@example.test`,
+      password: passwordHash,
+    });
+    createdUserIds.push(user._id);
+    return user._id;
+  }
+  const owner = await createTestUser("Owner");
+  const otherUser = await createTestUser("Other");
   async function insert({ user = owner, completedAt = new Date(), evaluationStatus = "not-requested" } = {}) {
     const id = new mongoose.Types.ObjectId();
     const question = new mongoose.Types.ObjectId();

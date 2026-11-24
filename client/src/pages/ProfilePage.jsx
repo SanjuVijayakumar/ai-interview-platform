@@ -136,61 +136,48 @@ function ProfilePage({ healthMessage, onLogout }) {
   const initials = profile?.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "U";
 
   return (
-    <main className="page-shell">
-      <header className="topbar">
-        <a className="brand" href="#profile" aria-label="PrepX home">
-          <span className="brand-mark" aria-hidden="true">P</span>
-          <span>PrepX<span className="brand-period">.</span></span>
-        </a>
-        <div className="topbar-user">
-          <span className="topbar-label">Your workspace</span>
-          <span className="mini-avatar" aria-hidden="true">{initials}</span>
-          <button className="button button-ghost logout-button" type="button" onClick={onLogout}>Log out</button>
+    <>
+      <nav className="breadcrumbs" aria-label="Breadcrumb">
+        <span>Account</span><span className="crumb-divider">/</span><span aria-current="page">Profile</span>
+      </nav>
+
+      <section className="page-heading">
+        <div>
+          <p className="eyebrow">ACCOUNT SETTINGS</p>
+          <h1>Your profile</h1>
+          <p className="heading-copy">Manage your details and tailor your interview preparation.</p>
         </div>
-      </header>
+        <div className="health-status" role="status" aria-live="polite">
+          <span className={`status-dot ${healthMessage === "Could not reach backend" ? "status-dot-error" : ""}`} />
+          <span>{healthMessage}</span>
+        </div>
+      </section>
 
-      <div className="content-wrap" id="profile">
-        <nav className="breadcrumbs" aria-label="Breadcrumb">
-          <span>Account</span><span className="crumb-divider">/</span><span aria-current="page">Profile</span>
-        </nav>
-
-        <section className="page-heading">
-          <div>
-            <p className="eyebrow">ACCOUNT SETTINGS</p>
-            <h1>Your profile</h1>
-            <p className="heading-copy">Manage your details and tailor your interview preparation.</p>
+      <section className="profile-card" aria-labelledby="profile-card-title">
+        <div className="profile-summary">
+          <div className="profile-avatar" aria-hidden="true">{initials}</div>
+          <div className="summary-copy">
+            <h2>{loading ? "Loading your profile…" : profile?.name || "Profile unavailable"}</h2>
+            <p>{profile?.targetRole || (loading ? "Fetching profile details" : "")}</p>
           </div>
-          <div className="health-status" role="status" aria-live="polite">
-            <span className={`status-dot ${healthMessage === "Could not reach backend" ? "status-dot-error" : ""}`} />
-            <span>{healthMessage}</span>
-          </div>
-        </section>
+        </div>
 
-        <section className="profile-card" aria-labelledby="profile-card-title">
-          <div className="profile-summary">
-            <div className="profile-avatar" aria-hidden="true">{initials}</div>
-            <div className="summary-copy">
-              <h2>{loading ? "Loading your profile…" : profile?.name || "Profile unavailable"}</h2>
-              <p>{profile?.targetRole || (loading ? "Fetching profile details" : "")}</p>
+        <div className="card-divider" />
+
+        <div className="profile-form">
+          <div className="section-intro">
+            <div>
+              <h2 id="profile-card-title">Personal information</h2>
+              <p>Keep your profile up to date for a more relevant preparation experience.</p>
             </div>
           </div>
 
-          <div className="card-divider" />
-
-          <div className="profile-form">
-            <div className="section-intro">
-              <div>
-                <h2 id="profile-card-title">Personal information</h2>
-                <p>Keep your profile up to date for a more relevant preparation experience.</p>
-              </div>
-            </div>
-
-            {loading ? (
-              <div className="profile-loading" role="status"><span className="loading-spinner" />Loading your profile from your account…</div>
-            ) : !profile ? (
-              <p className={`form-notice notice-${notice.type || "error"}`} role="alert">{notice.text || "Your profile could not be loaded."}</p>
-            ) : (
-              <form onSubmit={saveChanges}>
+          {loading ? (
+            <div className="profile-loading" role="status"><span className="loading-spinner" />Loading your profile from your account…</div>
+          ) : !profile ? (
+            <p className={`form-notice notice-${notice.type || "error"}`} role="alert">{notice.text || "Your profile could not be loaded."}</p>
+          ) : (
+            <form onSubmit={saveChanges}>
               <div className="form-grid">
                 <div className="field">
                   <label htmlFor="name">Full name</label>
@@ -228,14 +215,13 @@ function ProfilePage({ healthMessage, onLogout }) {
                 </button>
               </div>
               {notice.text && <p className={`form-notice notice-${notice.type}`} role={notice.type === "error" ? "alert" : "status"}>{notice.text}</p>}
-              </form>
-            )}
-          </div>
-        </section>
+            </form>
+          )}
+        </div>
+      </section>
 
-        <footer className="page-footer"><span>PREPARED FOR WHAT’S NEXT</span><span>Profile details are saved to your account.</span></footer>
-      </div>
-    </main>
+      <footer className="page-footer"><span>PREPARED FOR WHAT’S NEXT</span><span>Profile details are saved to your account.</span></footer>
+    </>
   );
 }
 

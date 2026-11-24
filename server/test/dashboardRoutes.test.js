@@ -6,6 +6,7 @@ import mongoose from "mongoose";
 import { createServer } from "node:http";
 import Interview from "../models/Interview.js";
 import InterviewResult from "../models/InterviewResult.js";
+import User from "../models/User.js";
 import dashboardRoutes from "../routes/dashboardRoutes.js";
 
 const testSecret = "dashboard-route-test-secret-only";
@@ -31,6 +32,7 @@ async function withApi(t, { interviews = [], sessions = [] } = {}) {
   const oldSecret = process.env.JWT_SECRET;
   const originalInterviewFind = Interview.find;
   const originalResultFind = InterviewResult.find;
+  const originalUserFindById = User.findById;
   process.env.JWT_SECRET = testSecret;
 
   let interviewFilter;
@@ -55,6 +57,17 @@ async function withApi(t, { interviews = [], sessions = [] } = {}) {
       (fields) => { resultProjection = fields; },
     );
   };
+  User.findById = (userId) => ({
+    select() {
+      return this;
+    },
+    lean() {
+      return Promise.resolve({
+        _id: new mongoose.Types.ObjectId(String(userId)),
+        role: "user",
+      });
+    },
+  });
 
   const app = express();
   app.use("/api/dashboard", dashboardRoutes);
@@ -64,6 +77,7 @@ async function withApi(t, { interviews = [], sessions = [] } = {}) {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     Interview.find = originalInterviewFind;
     InterviewResult.find = originalResultFind;
+    User.findById = originalUserFindById;
     if (oldSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = oldSecret;
   });
