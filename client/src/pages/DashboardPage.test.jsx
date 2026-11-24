@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { createMemoryRouter, RouterProvider } from "react-router-dom";
+import { createMemoryRouter, Link, RouterProvider } from "react-router-dom";
 import DashboardPage from "./DashboardPage.jsx";
 import { logoutUser } from "../services/authService.js";
 import { getDashboardStats } from "../services/dashboardService.js";
@@ -18,9 +18,14 @@ const defaultStats = {
   averageScore: 87.6,
 };
 
+function ReturnToDashboard() {
+  return <Link to="/dashboard">Return to Dashboard</Link>;
+}
+
 function renderDashboard() {
   const router = createMemoryRouter([
     { path: "/dashboard", element: <DashboardPage /> },
+    { path: "/mock-session/:sessionId", element: <ReturnToDashboard /> },
     { path: "/login", element: <p>Login route</p> },
     { path: "/interviews", element: <p>Interviews route</p> },
   ], { initialEntries: ["/dashboard"] });
@@ -31,8 +36,8 @@ function cardValue(label) {
   return within(screen.getByText(label).closest("article")).getByText(/^(?:\d+(?:\.\d+)?|—|…)$/);
 }
 
-function makeInterview(id, title, createdAt, status = "scheduled") {
-  return {
+function makeInterview(id, title, createdAt, status = "scheduled", practiceStatus) {
+  const interview = {
     _id: id,
     title,
     category: "Engineering",
@@ -40,6 +45,8 @@ function makeInterview(id, title, createdAt, status = "scheduled") {
     createdAt,
     status,
   };
+  if (practiceStatus !== undefined) interview.practiceStatus = practiceStatus;
+  return interview;
 }
 
 function deferred() {
@@ -68,9 +75,9 @@ describe("DashboardPage", () => {
       averageScore: 87.56,
     });
     getInterviews.mockResolvedValue([
-      makeInterview("older", "Older session", "2026-10-01T10:00:00.000Z", "completed"),
-      makeInterview("newest", "Newest session", "2026-11-01T10:00:00.000Z", "scheduled"),
-      makeInterview("middle", "Middle session", "2026-10-15T10:00:00.000Z", "in-progress"),
+      makeInterview("older", "Older session", "2026-10-01T10:00:00.000Z", "scheduled", "completed"),
+      makeInterview("newest", "Newest session", "2026-11-01T10:00:00.000Z", "completed", "scheduled"),
+      makeInterview("middle", "Middle session", "2026-10-15T10:00:00.000Z", "scheduled", "in-progress"),
     ]);
 
     renderDashboard();
@@ -87,6 +94,27 @@ describe("DashboardPage", () => {
     expect([...recentTitles].map((heading) => heading.textContent)).toEqual([
       "Newest session", "Middle session", "Older session",
     ]);
+    expect(screen.getByLabelText("Practice status: Scheduled")).toBeInTheDocument();
+    expect(screen.getByLabelText("Practice status: In Progress")).toBeInTheDocument();
+    expect(screen.getByLabelText("Practice status: Completed")).toBeInTheDocument();
+    expect(screen.getByLabelText("Practice status: Scheduled")).toHaveClass("theme-status-warning");
+    expect(screen.getByLabelText("Practice status: Completed")).toHaveClass("theme-status-success");
+  });
+
+  it.each([
+    { practiceStatus: undefined, storedStatus: "completed" },
+    { practiceStatus: "unknown", storedStatus: "in-progress" },
+  ])("does not present stored status as practice progress when practiceStatus is $practiceStatus", async ({ practiceStatus, storedStatus }) => {
+    getInterviews.mockResolvedValue([
+      makeInterview("unknown", "Unverified practice status", "2026-11-01T10:00:00.000Z", storedStatus, practiceStatus),
+    ]);
+    renderDashboard();
+
+    expect(await screen.findByText("Unverified practice status")).toBeInTheDocument();
+    expect(screen.getByLabelText("Practice status: Practice status unavailable")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Practice status: Completed")).not.toBeInTheDocument();
+    expect(cardValue("Total interviews")).toHaveTextContent("4");
+    expect(cardValue("Average score")).toHaveTextContent("87.6");
   });
 
   it.each([
@@ -151,6 +179,32 @@ describe("DashboardPage", () => {
     expect(await screen.findByText("Interview history recovered")).toBeInTheDocument();
     expect(getInterviews).toHaveBeenCalledTimes(2);
     expect(getDashboardStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes practice status after returning from a completed mock session without changing statistics", async () => {
+    const user = userEvent.setup();
+    let interviewRequest = 0;
+    getInterviews.mockImplementation(async () => {
+      interviewRequest += 1;
+      return [makeInterview(
+        "practice",
+        "Practice interview",
+        "2026-11-01T10:00:00.000Z",
+        "scheduled",
+        interviewRequest === 1 ? "in-progress" : "completed",
+      )];
+    });
+    const { router } = renderDashboard();
+
+    expect(await screen.findByLabelText("Practice status: In Progress")).toBeInTheDocument();
+    await act(async () => { await router.navigate("/mock-session/session-1"); });
+    await user.click(screen.getByRole("link", { name: "Return to Dashboard" }));
+
+    expect(await screen.findByLabelText("Practice status: Completed")).toBeInTheDocument();
+    expect(getInterviews).toHaveBeenCalledTimes(2);
+    expect(cardValue("Completed interviews")).toHaveTextContent("2");
+    expect(cardValue("Average score")).toHaveTextContent("87.6");
+    expect(getDashboardStats).toHaveBeenCalledTimes(2);
   });
 
   it("redirects to login and logs out when either request is unauthorized", async () => {

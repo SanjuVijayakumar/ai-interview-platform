@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import InterviewPracticeStatusBadge from "../components/InterviewPracticeStatusBadge.jsx";
 import { logoutUser } from "../services/authService.js";
 import { getDashboardStats } from "../services/dashboardService.js";
 import { getInterviews } from "../services/interviewService.js";
@@ -36,17 +37,6 @@ function formatDate(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Date unavailable";
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
-}
-
-function statusStyle(status) {
-  if (status === "completed") return "theme-status-success";
-  if (status === "in-progress") return "theme-status-info";
-  return "theme-status-warning";
-}
-
-function formatStatus(status) {
-  if (!status) return "Status unavailable";
-  return status.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function formatAverageScore(score) {
@@ -226,7 +216,7 @@ function DashboardPage({ user }) {
                     <time dateTime={interview.createdAt || undefined}>{formatDate(interview.createdAt)}</time>
                   </div>
                 </div>
-                <span className={`inline-flex w-fit rounded-full px-3 py-1 text-xs font-semibold ${statusStyle(interview.status)}`}>{formatStatus(interview.status)}</span>
+                <InterviewPracticeStatusBadge practiceStatus={interview.practiceStatus} />
               </article>
             ))}
           </div>

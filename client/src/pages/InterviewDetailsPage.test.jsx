@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import InterviewDetailsPage from "./InterviewDetailsPage.jsx";
 import { createQuestion, generateInterviewQuestions, getQuestions } from "../services/questionService.js";
 import { getInterviewById } from "../services/interviewService.js";
-import { findInProgressMockSession } from "../services/mockSessionService.js";
+import { createMockSession, findInProgressMockSession } from "../services/mockSessionService.js";
 
 vi.mock("../services/questionService.js", () => ({
   createQuestion: vi.fn(),
@@ -30,6 +30,7 @@ const interview = {
   category: "Technical",
   difficulty: "Intermediate",
   status: "active",
+  practiceStatus: "completed",
   createdAt: "2026-01-01T00:00:00.000Z",
 };
 
@@ -60,11 +61,13 @@ function deferred() {
   return { promise, resolve };
 }
 
-function renderPage() {
+function renderPage(interviewRecord = interview) {
   const router = createMemoryRouter([
     { path: "/interviews/:interviewId", element: <InterviewDetailsPage /> },
+    { path: "/mock-session/:sessionId", element: <p>Mock session opened</p> },
     { path: "/login", element: <p>Login route</p> },
   ], { initialEntries: ["/interviews/interview-1"] });
+  getInterviewById.mockResolvedValue(interviewRecord);
   return { ...render(<RouterProvider router={router} />), router };
 }
 
@@ -87,12 +90,59 @@ beforeEach(() => {
   getInterviewById.mockResolvedValue(interview);
   getQuestions.mockResolvedValue([]);
   findInProgressMockSession.mockResolvedValue(null);
+  createMockSession.mockResolvedValue({ _id: "new-session", status: "in-progress" });
   generateInterviewQuestions.mockResolvedValue(generatedQuestions);
 });
 
 afterEach(() => cleanup());
 
 describe("InterviewDetailsPage AI question generation", () => {
+  it("displays backend practice status rather than the stored manual status", async () => {
+    renderPage({ ...interview, status: "active", practiceStatus: "completed" });
+
+    expect(await screen.findByLabelText("Practice status: Completed")).toHaveClass("theme-status-success");
+    expect(screen.queryByLabelText("Practice status: In Progress")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { practiceStatus: undefined, storedStatus: "completed" },
+    { practiceStatus: "unknown", storedStatus: "in-progress" },
+  ])("does not display stored status when practiceStatus is unavailable", async ({ practiceStatus, storedStatus }) => {
+    const interviewRecord = { ...interview, status: storedStatus };
+    if (practiceStatus !== undefined) interviewRecord.practiceStatus = practiceStatus;
+    else delete interviewRecord.practiceStatus;
+    renderPage(interviewRecord);
+
+    expect(await screen.findByLabelText("Practice status: Practice status unavailable")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Practice status: Completed")).not.toBeInTheDocument();
+  });
+
+  it("starts a mock session without changing the existing start flow", async () => {
+    const user = userEvent.setup();
+    getQuestions.mockResolvedValue([{ _id: "question-1", questionText: "Question", order: 1 }]);
+    findInProgressMockSession.mockResolvedValue(null);
+    createMockSession.mockResolvedValue({ _id: "new-session", status: "in-progress" });
+    const { router } = renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "Start Mock Interview" }));
+
+    expect(await screen.findByText("Mock session opened")).toBeInTheDocument();
+    expect(createMockSession).toHaveBeenCalledWith("interview-1");
+    expect(router.state.location.pathname).toBe("/mock-session/new-session");
+  });
+
+  it("resumes the existing in-progress mock session without creating another", async () => {
+    const user = userEvent.setup();
+    findInProgressMockSession.mockResolvedValue({ _id: "existing-session", status: "in-progress" });
+    const { router } = renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "Resume Mock Interview" }));
+
+    expect(await screen.findByText("Mock session opened")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/mock-session/existing-session");
+    expect(createMockSession).not.toHaveBeenCalled();
+  });
+
   it("generates a preview with selected preferences and supports bulk and individual selection without saving", async () => {
     const user = userEvent.setup();
     const generation = deferred();

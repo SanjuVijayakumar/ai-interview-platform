@@ -2,6 +2,7 @@ import express from "express";
 import mongoose from "mongoose";
 import Interview from "../models/Interview.js";
 import authMiddleware from "../middleware/authMiddleware.js";
+import { getInterviewPracticeStatuses } from "../utils/interviewPracticeStatus.js";
 
 const router = express.Router();
 
@@ -44,11 +45,19 @@ router.get("/", authMiddleware, async (req, res) => {
     const interviews = await Interview.find({
       user: req.user.userId,
     }).sort({ createdAt: -1 });
+    const practiceStatuses = await getInterviewPracticeStatuses(
+      interviews.map((interview) => interview._id),
+      req.user.userId
+    );
+    const interviewsWithPracticeStatus = interviews.map((interview) => ({
+      ...interview.toObject(),
+      practiceStatus: practiceStatuses.get(String(interview._id)) || "scheduled",
+    }));
 
     res.status(200).json({
       success: true,
       count: interviews.length,
-      interviews,
+      interviews: interviewsWithPracticeStatus,
     });
   } catch (error) {
     res.status(500).json({
@@ -199,10 +208,15 @@ router.get("/:id", authMiddleware, async (req, res) => {
       });
     }
 
+    const practiceStatuses = await getInterviewPracticeStatuses([interview._id], req.user.userId);
+
     // 4. Return the interview
     return res.status(200).json({ 
       success: true, 
-      interview, 
+      interview: {
+        ...interview.toObject(),
+        practiceStatus: practiceStatuses.get(String(interview._id)) || "scheduled",
+      },
     });
 
   } catch (error) {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import InterviewPracticeStatusBadge from "../components/InterviewPracticeStatusBadge.jsx";
 import { getInterviewById } from "../services/interviewService.js";
 import { createQuestion, deleteQuestion, generateInterviewQuestions, getQuestions, updateQuestion } from "../services/questionService.js";
 import { createMockSession, findInProgressMockSession } from "../services/mockSessionService.js";
@@ -10,16 +11,6 @@ const difficulties = ["Beginner", "Intermediate", "Advanced"];
 function formatDate(value) {
   if (!value || Number.isNaN(new Date(value).getTime())) return "Date unavailable";
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(value));
-}
-
-function displayStatus(status) {
-  return status?.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) || "Status unavailable";
-}
-
-function statusClasses(status) {
-  if (status === "completed") return "theme-status-success";
-  if (status === "in-progress") return "theme-status-info";
-  return "theme-status-warning";
 }
 
 function questionMatchesGenerated(savedQuestion, generatedQuestion) {
@@ -626,7 +617,7 @@ function InterviewDetailsPage() {
           <DetailItem label="Interview title">{interview?.title || "Interview title unavailable"}</DetailItem>
           <DetailItem label="Category">{interview?.category || "Category unavailable"}</DetailItem>
           <DetailItem label="Difficulty">{interview?.difficulty || "Difficulty unavailable"}</DetailItem>
-          <DetailItem label="Status"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${statusClasses(interview?.status)}`}>{displayStatus(interview?.status)}</span></DetailItem>
+          <DetailItem label="Practice status"><InterviewPracticeStatusBadge practiceStatus={interview?.practiceStatus} /></DetailItem>
           <DetailItem label="Created date"><time dateTime={interview?.createdAt || undefined}>{formatDate(interview?.createdAt)}</time></DetailItem>
           {interview._id && <DetailItem label="Interview ID">{interview._id}</DetailItem>}
         </dl>

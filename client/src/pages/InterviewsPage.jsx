@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import InterviewPracticeStatusBadge from "../components/InterviewPracticeStatusBadge.jsx";
 import { createInterview, deleteInterview, getInterviews, updateInterview } from "../services/interviewService.js";
 
 const blankForm = { title: "", category: "", difficulty: "Beginner", status: "scheduled" };
@@ -9,12 +10,6 @@ const statuses = ["scheduled", "in-progress", "completed"];
 function formatDate(value) {
   if (!value || Number.isNaN(new Date(value).getTime())) return "Date unavailable";
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(value));
-}
-
-function statusClasses(status) {
-  if (status === "completed") return "theme-status-success";
-  if (status === "in-progress") return "theme-status-info";
-  return "theme-status-warning";
 }
 
 function displayStatus(status) {
@@ -204,7 +199,7 @@ function InterviewsPage() {
               <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
                 <div className="min-w-0">
                   <div className="mb-3 flex flex-wrap items-center gap-2">
-                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusClasses(interview.status)}`}>{displayStatus(interview.status)}</span>
+                    <InterviewPracticeStatusBadge practiceStatus={interview.practiceStatus} />
                     <span className="rounded-full theme-inset-surface px-3 py-1 text-xs font-medium theme-text-secondary">{interview.difficulty}</span>
                   </div>
                   <h2 className="mb-1 break-words font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">{interview.title}</h2>
@@ -240,7 +235,7 @@ function InterviewsPage() {
               <label className="block"><span className="mb-1.5 block text-sm font-semibold theme-text-primary">Interview title</span><input autoFocus required value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} placeholder="e.g. Frontend Developer Practice" className="h-11 w-full rounded-xl border theme-border px-3 text-sm outline-none transition placeholder:theme-text-muted theme-input-focus focus:ring-2 theme-input-focus" /></label>
               <label className="block"><span className="mb-1.5 block text-sm font-semibold theme-text-primary">Category</span><input required value={form.category} onChange={(event) => setForm((current) => ({ ...current, category: event.target.value }))} placeholder="e.g. Frontend Development" className="h-11 w-full rounded-xl border theme-border px-3 text-sm outline-none transition placeholder:theme-text-muted theme-input-focus focus:ring-2 theme-input-focus" /></label>
               <label className="block"><span className="mb-1.5 block text-sm font-semibold theme-text-primary">Difficulty</span><select required value={form.difficulty} onChange={(event) => setForm((current) => ({ ...current, difficulty: event.target.value }))} className="h-11 w-full rounded-xl border theme-border theme-card-surface px-3 text-sm outline-none transition theme-input-focus focus:ring-2 theme-input-focus">{difficulties.map((difficulty) => <option key={difficulty}>{difficulty}</option>)}</select></label>
-              {editingInterview && <label className="block"><span className="mb-1.5 block text-sm font-semibold theme-text-primary">Status</span><select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))} className="h-11 w-full rounded-xl border theme-border theme-card-surface px-3 text-sm outline-none transition theme-input-focus focus:ring-2 theme-input-focus">{statuses.map((status) => <option key={status} value={status}>{displayStatus(status)}</option>)}</select></label>}
+              {editingInterview && <label className="block"><span className="mb-1.5 block text-sm font-semibold theme-text-primary">Manual interview status</span><select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))} className="h-11 w-full rounded-xl border theme-border theme-card-surface px-3 text-sm outline-none transition theme-input-focus focus:ring-2 theme-input-focus">{statuses.map((status) => <option key={status} value={status}>{displayStatus(status)}</option>)}</select><span className="mt-1.5 block text-xs leading-5 theme-text-muted">Manually managed; practice progress is calculated from mock sessions.</span></label>}
               {formError && <p className="mb-0 rounded-lg border theme-border-error theme-error-surface px-3 py-2.5 text-sm theme-text-error" role="alert">{formError}</p>}
               <div className="flex flex-col-reverse gap-2 border-t theme-border-subtle pt-4 sm:flex-row sm:justify-end">
                 <button type="button" onClick={closeModal} disabled={saving} className="rounded-xl border theme-border px-4 py-2.5 text-sm font-semibold theme-text-secondary transition theme-hover-surface disabled:opacity-50">Cancel</button>
