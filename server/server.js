@@ -10,6 +10,7 @@ import resultRoutes from "./routes/resultRoutes.js";
 import aiQuestionRoutes from "./routes/aiQuestionRoutes.js";
 import mockSessionRoutes from "./routes/mockSessionRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
 
 
 dotenv.config();
@@ -38,6 +39,14 @@ app.get("/api/health", (req, res) => {
 
 // Register API routes
 app.use("/api/auth", authRoutes);
+
+app.use("/api/admin", adminRoutes);
+app.use("/api/admin", (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: "Admin endpoint not found",
+  });
+});
 
 app.use("/api/interviews", interviewRoutes);
 app.use("/api/interviews", aiQuestionRoutes);
