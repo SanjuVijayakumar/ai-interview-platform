@@ -5,6 +5,9 @@ import express from "express";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import { createServer } from "node:http";
+import Interview from "../models/Interview.js";
+import InterviewResult from "../models/InterviewResult.js";
+import Question from "../models/Question.js";
 import User from "../models/User.js";
 import authMiddleware from "../middleware/authMiddleware.js";
 import adminRoutes from "../routes/adminRoutes.js";
@@ -77,7 +80,7 @@ async function createAdminApi(t, lookupUser = () => null) {
         headers: requestHeaders,
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      return { status: response.status, body: await response.json() };
+      return { status: response.status, body: await response.json(), headers: response.headers };
     },
   };
 }
@@ -250,4 +253,79 @@ test("production server registers the admin router and its fallback before the b
   assert.notEqual(mockSessionMount, -1);
   assert.ok(adminMount < adminFallback);
   assert.ok(adminFallback < mockSessionMount);
+});
+
+const STATS_PATH = "/api/admin/dashboard/stats";
+
+function stubStatsAggregates(t, error) {
+  return [
+    [User, { accounts: [], trend: [], recent: [] }],
+    [Interview, { categories: [], recent: [] }],
+    [Question, { total: [], recent: [] }],
+    [InterviewResult, { summary: [], started: [], completed: [] }],
+  ].map(([model, result]) => t.mock.method(model, "aggregate", () => ({
+    option() { return this; },
+    async exec() {
+      if (model === InterviewResult && error) throw error;
+      return [result];
+    },
+  })));
+}
+
+test("admin stats are served only for a verified administrator and are never cached", async (t) => {
+  const userId = validUserId();
+  const deletedId = validUserId();
+  let currentRole = "user";
+  const api = await createAdminApi(t, (id) => id === userId ? databaseUser(id, currentRole) : null);
+  const aggregates = stubStatsAggregates(t);
+
+  for (const [token, status] of [
+    [undefined, 401],
+    ["malformed", 401],
+    [createToken(userId, "admin", { expiresIn: -1 }), 401],
+    [createToken(deletedId, "admin"), 401],
+    [createToken(userId, "user"), 403],
+    [createToken(userId, "admin"), 403],
+  ]) {
+    const response = await api.request({ token, path: STATS_PATH });
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.body.success, false);
+    assert.equal(Object.hasOwn(response.body, "data"), false);
+  }
+  assert.ok(aggregates.every(({ mock }) => mock.callCount() === 0));
+
+  currentRole = "admin";
+  const response = await api.request({ token: createToken(userId, "user"), path: STATS_PATH });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(Object.keys(response.body).sort(), ["data", "success"]);
+  assert.equal(response.body.success, true);
+  assert.equal(response.body.data.timezone, "UTC");
+  assert.equal(response.body.data.registrationTrend.length, 30);
+  assert.doesNotMatch(JSON.stringify(response.body), /private|userId|email|password|token/i);
+  assert.ok(aggregates.every(({ mock }) => mock.callCount() === 1));
+  assert.equal(api.broadRouterCalls, 0);
+});
+
+test("admin stats fail safely on database and unexpected errors", async (t) => {
+  const failures = [
+    [Object.assign(new Error("private connection details"), { name: "MongoServerSelectionError" }), 503],
+    [new Error("private nested query context", { cause: { code: 50 } }), 503],
+    [new Error("private unexpected details"), 500],
+  ];
+  for (const [error, expected] of failures) {
+    await t.test(`returns ${expected} for ${error.name}`, async (subtest) => {
+      const userId = validUserId();
+      const api = await createAdminApi(subtest, (id) => databaseUser(id, "admin"));
+      stubStatsAggregates(subtest, error);
+      const response = await api.request({ token: createToken(userId, "admin"), path: STATS_PATH });
+      assert.equal(response.status, expected);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.deepEqual(response.body, {
+        success: false,
+        message: "Failed to retrieve administrator dashboard statistics.",
+      });
+    });
+  }
 });

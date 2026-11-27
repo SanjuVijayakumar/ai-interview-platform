@@ -5,7 +5,7 @@ import ProtectedSessionBoundary from "./components/auth/ProtectedSessionBoundary
 import { AuthProvider, useAuth } from "./contexts/AuthContext.jsx";
 import AdminLayout from "./layouts/AdminLayout.jsx";
 import { AuthenticatedDashboardLayout } from "./layouts/DashboardLayout.jsx";
-import AdminDashboardPlaceholder from "./pages/AdminDashboardPlaceholder.jsx";
+import AdminDashboardPage from "./pages/AdminDashboardPage.jsx";
 import AdminPlaceholder from "./pages/AdminPlaceholder.jsx";
 import { CapabilityBoundDashboardPage } from "./pages/DashboardPage.jsx";
 import { CapabilityBoundInterviewsPage } from "./pages/InterviewsPage.jsx";
@@ -163,7 +163,7 @@ function AppRoutes({ healthMessage }) {
         <Route index element={<Navigate to="dashboard" replace />} />
         {adminNavigation.flatMap(({ pages }) => pages).map(({ path, title }) => (
           <Route key={path} path={path} element={path === "dashboard"
-            ? <AdminDashboardPlaceholder />
+            ? <AdminDashboardPage />
             : <AdminPlaceholder>{title} functionality is pending.</AdminPlaceholder>}
           />
         ))}

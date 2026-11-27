@@ -5,13 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useOutletContext } from "react-router-dom";
 import App from "./App.jsx";
 
-vi.mock("./pages/AdminDashboardPlaceholder.jsx", async (importOriginal) => {
-  const { default: AdminDashboardPlaceholder } = await importOriginal();
+vi.mock("./pages/AdminDashboardPage.jsx", () => {
   return {
     default: function DashboardWithCapabilityObserver() {
       const { capability } = useOutletContext();
       useEffect(() => { observeAdminCapability?.(capability); }, [capability]);
-      return <AdminDashboardPlaceholder />;
+      return <h2>Admin Dashboard</h2>;
     },
   };
 });
@@ -188,12 +187,12 @@ describe("atomic production authentication", () => {
     respond = (request) => request.path === "/admin/me" ? pending.promise : defaultResponse(request);
     mount("/admin/dashboard");
     expect(await screen.findByText("Verifying administrator access…")).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "Administrator Dashboard" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Admin Dashboard" })).not.toBeInTheDocument();
     await waitFor(() => expect(administratorRequests()).toEqual([
       expect.objectContaining({ method: "GET", bearer: token, redirect: "error" }),
     ]));
     await act(async () => pending.resolve(administratorIdentity()));
-    expect(await screen.findByRole("heading", { name: "Administrator Dashboard" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Admin Dashboard" })).toBeVisible();
     expect(location.pathname).toBe("/admin/dashboard");
     expect(protectedReads()).toEqual([]);
   });
@@ -284,7 +283,7 @@ describe("atomic production authentication", () => {
     ]));
     expect(protectedReads()).toEqual([]);
     await act(async () => pending.resolve(administratorIdentity()));
-    expect(await screen.findByRole("heading", { name: "Administrator Dashboard" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Admin Dashboard" })).toBeVisible();
     expect(location.pathname).toBe("/admin/dashboard");
     expect(administratorRequests()).toHaveLength(1);
     expect(replace.mock.calls.map(([, , url]) => url)).toEqual(["/admin/dashboard"]);
@@ -294,7 +293,7 @@ describe("atomic production authentication", () => {
     currentProfile = { ...profile, role: "admin" };
     respond = (request) => request.path === "/admin/me" ? administratorIdentity() : defaultResponse(request);
     mount(path);
-    expect(await screen.findByRole("heading", { name: "Administrator Dashboard" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Admin Dashboard" })).toBeVisible();
     expect(location.pathname).toBe("/admin/dashboard");
     expect(administratorRequests()).toHaveLength(1);
     expect(calls.filter(({ kind }) => kind === "login")).toHaveLength(0);
@@ -304,9 +303,9 @@ describe("atomic production authentication", () => {
     currentProfile = { ...profile, role: "admin" };
     respond = (request) => request.path === "/admin/me" ? administratorIdentity() : defaultResponse(request);
     mount("/admin/dashboard");
-    await screen.findByRole("heading", { name: "Administrator Dashboard" });
+    await screen.findByRole("heading", { name: "Admin Dashboard" });
     await act(async () => visit("/login"));
-    expect(await screen.findByRole("heading", { name: "Administrator Dashboard" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Admin Dashboard" })).toBeVisible();
     expect(location.pathname).toBe("/admin/dashboard");
     expect(administratorRequests()).toHaveLength(1);
   });
@@ -350,7 +349,7 @@ describe("atomic production authentication", () => {
   });
 
   it.each([
-    ["Retry", "Administrator Dashboard", "/admin/dashboard"],
+    ["Retry", "Admin Dashboard", "/admin/dashboard"],
     ["Sign out", "Sign in to PrepX", "/login"],
     ["Continue to personal dashboard", "Welcome back, Ada", "/dashboard"],
   ])("offers %s after a recoverable administrator verification failure", async (action, heading, path) => {
@@ -400,7 +399,7 @@ describe("atomic production authentication", () => {
     };
     mount("/login", null);
     await act(async () => changeToken(nextToken));
-    expect(await screen.findByRole("heading", { name: "Administrator Dashboard" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Admin Dashboard" })).toBeVisible();
     expect(administratorRequests()).toEqual([expect.objectContaining({ bearer: nextToken })]);
     expect(calls.filter(({ kind }) => kind === "login")).toEqual([]);
   });
@@ -615,7 +614,9 @@ describe("administrator workspace", () => {
     mount(`/admin/${path}`);
     expect(await screen.findByRole("heading", { name: title, level: 1 })).toBeVisible();
     expect(within(adminNavigation()).getByRole("link", { name: title })).toHaveAttribute("aria-current", "page");
-    expect(within(screen.getByRole("main")).getByText(/pending\.$/)).toBeVisible();
+    const main = within(screen.getByRole("main"));
+    if (path === "dashboard") expect(main.getByRole("heading", { name: "Admin Dashboard" })).toBeVisible();
+    else expect(main.getByText(/pending\.$/)).toBeVisible();
     expect(administratorRequests()).toHaveLength(1);
     expect(protectedReads()).toEqual([]);
   });
@@ -650,7 +651,7 @@ describe("administrator workspace", () => {
     expect(screen.queryByRole("navigation", { name: "Administrator navigation" })).toBeNull();
     await act(async () => verification.resolve(administratorIdentity(admin)));
 
-    expect(await screen.findByRole("heading", { name: "Administrator Dashboard" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Admin Dashboard" })).toBeVisible();
     expect(location.pathname).toBe("/admin/dashboard");
     const nav = adminNavigation();
     const header = screen.getByRole("banner");
@@ -700,7 +701,7 @@ describe("administrator workspace", () => {
     observeAdminCapability = vi.fn();
     respond = (request) => request.path === "/admin/probe" ? json({}, 403) : allowAdmin(request);
     mount("/admin/dashboard");
-    await screen.findByRole("heading", { name: "Administrator Dashboard" });
+    await screen.findByRole("heading", { name: "Admin Dashboard" });
     const [[capability]] = observeAdminCapability.mock.calls;
     expect(capability.isCurrent()).toBe(true);
     await expect(capability.fetch("dashboard/stats")).rejects.toBeDefined();
