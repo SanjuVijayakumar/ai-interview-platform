@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { getEvaluationStatus, getInterviewResult, requestEvaluation } from "../services/resultService.js";
 import { logoutUser } from "../services/authService.js";
@@ -9,6 +9,184 @@ const STATUS_COPY = {
   completed: "Evaluation complete. Your score and feedback are saved to this session.",
   failed: "The evaluation could not be completed. Your answers are still saved.",
 };
+
+const STATUS_POLL_MS = 1400;
+const UNKNOWN_OUTCOME = "The evaluation outcome could not be confirmed. Check its status before submitting again.";
+
+function isCurrentCapability(capability) {
+  try {
+    return typeof capability?.fetch === "function" && capability.isCurrent() === true;
+  } catch {
+    return false;
+  }
+}
+
+function isTerminated(error) {
+  return error?.status === 401 || ["unauthorized", "stale-session", "cancelled"].includes(error?.category);
+}
+
+function evaluationRequestMessage(error) {
+  switch (error.status) {
+    case 400: return "This result could not be submitted for evaluation.";
+    case 403: return "You do not have permission to evaluate this result.";
+    case 404: return "This result is unavailable.";
+    case 429: return "The evaluation rate limit was reached. Try again later.";
+    default: return "The evaluation request could not be completed.";
+  }
+}
+
+export function CapabilityBoundEvaluationResultPage({ capability }) {
+  const { resultId } = useParams();
+  const [origin] = useState(() => capability);
+  if (capability !== origin || !isCurrentCapability(origin)) {
+    return <p role="alert">The authentication session for this result is unavailable.</p>;
+  }
+  return <BoundEvaluationLifecycle key={resultId} capability={origin} resultId={resultId} />;
+}
+
+function BoundEvaluationLifecycle({ capability, resultId }) {
+  const [result, setResult] = useState(null);
+  const [evaluationState, setEvaluationState] = useState(null);
+  const [error, setError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [checkingStatus, setCheckingStatus] = useState(false);
+  const [needsStatusCheck, setNeedsStatusCheck] = useState(false);
+  const lifecycleRef = useRef(null);
+  const actionLock = useRef(false);
+
+  useLayoutEffect(() => {
+    const controller = new AbortController();
+    lifecycleRef.current = controller;
+    return () => {
+      lifecycleRef.current = null;
+      controller.abort();
+    };
+  }, []);
+
+  const isActive = useCallback((lifecycle) =>
+    lifecycle !== null && lifecycleRef.current === lifecycle && isCurrentCapability(capability),
+  [capability]);
+
+  useEffect(() => {
+    const lifecycle = lifecycleRef.current;
+    async function load() {
+      if (!isActive(lifecycle)) return;
+      const options = { capability, signal: lifecycle.signal };
+      try {
+        const [saved, status] = await Promise.all([
+          getInterviewResult(resultId, options),
+          getEvaluationStatus(resultId, options),
+        ]);
+        if (!isActive(lifecycle)) return;
+        setResult(saved);
+        setEvaluationState(status);
+      } catch (requestError) {
+        if (!isActive(lifecycle) || isTerminated(requestError)) return;
+        setError(requestError.status === 403
+          ? "You do not have permission to view this result."
+          : "This result could not be loaded.");
+      }
+    }
+    queueMicrotask(load);
+  }, [capability, isActive, resultId]);
+
+  const shouldPoll = evaluationState?.status === "pending" && !needsStatusCheck;
+  useEffect(() => {
+    if (!shouldPoll) return;
+    const lifecycle = lifecycleRef.current;
+    let active = true;
+    let timer;
+    const canPoll = () => active && isActive(lifecycle);
+
+    async function poll() {
+      if (!canPoll()) return;
+      try {
+        const status = await getEvaluationStatus(resultId, { capability, signal: lifecycle.signal });
+        if (!canPoll()) return;
+        setEvaluationState(status);
+        if (status.status === "pending") timer = setTimeout(poll, STATUS_POLL_MS);
+      } catch (requestError) {
+        if (!canPoll() || isTerminated(requestError)) return;
+        setActionError("Evaluation status could not be refreshed.");
+        setNeedsStatusCheck(true);
+      }
+    }
+
+    timer = setTimeout(poll, STATUS_POLL_MS);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [capability, isActive, resultId, shouldPoll]);
+
+  async function recoverStatus(lifecycle, fallback = "") {
+    if (!isActive(lifecycle)) return;
+    try {
+      const status = await getEvaluationStatus(resultId, { capability, signal: lifecycle.signal });
+      if (!isActive(lifecycle)) return;
+      setEvaluationState(status);
+      setNeedsStatusCheck(false);
+      setActionError(status.status === "not-requested" ? fallback : "");
+    } catch (requestError) {
+      if (!isActive(lifecycle) || isTerminated(requestError)) return;
+      setNeedsStatusCheck(true);
+      setActionError("Evaluation status could not be confirmed. Check the status again.");
+    }
+  }
+
+  async function checkStatus() {
+    const lifecycle = lifecycleRef.current;
+    if (!needsStatusCheck || actionLock.current || !isActive(lifecycle)) return;
+    actionLock.current = true;
+    setCheckingStatus(true);
+    try {
+      await recoverStatus(lifecycle);
+    } finally {
+      if (isActive(lifecycle)) {
+        actionLock.current = false;
+        setCheckingStatus(false);
+      }
+    }
+  }
+
+  async function handleEvaluationRequest(retry) {
+    const lifecycle = lifecycleRef.current;
+    const eligible = retry === true
+      ? evaluationState?.status === "failed" && evaluationState.retryAvailable === true
+      : retry === false && evaluationState?.status === "not-requested";
+    if (!eligible || result?.status !== "completed" || needsStatusCheck || actionLock.current || !isActive(lifecycle)) return;
+    actionLock.current = true;
+    setSubmitting(true);
+    setActionError("");
+    try {
+      const status = await requestEvaluation(resultId, retry, { capability, signal: lifecycle.signal });
+      if (isActive(lifecycle)) setEvaluationState(status);
+    } catch (requestError) {
+      if (!isActive(lifecycle) || isTerminated(requestError)) return;
+      if (requestError.status === 409 || requestError.status === 502) {
+        await recoverStatus(lifecycle, evaluationRequestMessage(requestError));
+      } else if (requestError.status >= 500 || ["network-error", "request-error", "body-read-error", "malformed-response"].includes(requestError.category)) {
+        setNeedsStatusCheck(true);
+        setActionError(UNKNOWN_OUTCOME);
+      } else {
+        setActionError(evaluationRequestMessage(requestError));
+      }
+    } finally {
+      if (isActive(lifecycle)) {
+        actionLock.current = false;
+        setSubmitting(false);
+      }
+    }
+  }
+
+  return <EvaluationResultView
+    resultId={resultId} result={result} evaluationState={evaluationState} error={error}
+    loading={!result && !error} submitting={submitting} actionError={actionError}
+    handleEvaluationRequest={handleEvaluationRequest}
+    checkStatus={needsStatusCheck ? checkStatus : undefined} checkingStatus={checkingStatus}
+  />;
+}
 
 const DIMENSION_LABELS = {
   technicalAccuracy: "Technical accuracy",
@@ -104,7 +282,7 @@ function EvaluationResultPage() {
         }
         else setActionErrorRecord({ resultId, message: requestError.message || "Evaluation status could not be refreshed." });
       }
-    }, 1400);
+    }, STATUS_POLL_MS);
     return () => { active = false; clearTimeout(timer); };
   }, [evaluationState?.status, navigate, resultId]);
 
@@ -130,6 +308,17 @@ function EvaluationResultPage() {
     }
   }
 
+  return <EvaluationResultView
+    resultId={resultId} result={result} evaluationState={evaluationState} error={error}
+    loading={loading} submitting={submitting} actionError={actionError}
+    handleEvaluationRequest={handleEvaluationRequest}
+  />;
+}
+
+function EvaluationResultView({
+  resultId, result, evaluationState, actionError, loading, error, submitting, handleEvaluationRequest,
+  checkStatus, checkingStatus,
+}) {
   if (loading) {
     return (
       <section className="mx-auto max-w-5xl space-y-4" role="status" aria-live="polite" aria-label="Loading evaluation result">
@@ -176,21 +365,26 @@ function EvaluationResultPage() {
         <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 id="evaluation-status-heading" className="mb-1 font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">Evaluation status</h2>
-            <p className="mb-0 text-sm leading-6 theme-text-secondary">{STATUS_COPY[status] || "Evaluation status is unavailable."}</p>
+            <p className="mb-0 text-sm leading-6 theme-text-secondary">{status === "pending" && checkStatus
+              ? "The last saved status was in progress."
+              : STATUS_COPY[status] || "Evaluation status is unavailable."}</p>
             {Number.isInteger(evaluationState?.attemptCount) && evaluationState.attemptCount > 0 && <p className="mb-0 mt-2 text-xs theme-text-muted">Attempt {evaluationState.attemptCount}</p>}
           </div>
-          {canStart && <button type="button" onClick={() => handleEvaluationRequest(false)} disabled={submitting} aria-busy={submitting} className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-60 sm:w-auto">
+          {canStart && !checkStatus && <button type="button" onClick={() => handleEvaluationRequest(false)} disabled={submitting} aria-busy={submitting} className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-60 sm:w-auto">
             {submitting && <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />}
             {submitting ? "Starting evaluation..." : "Generate AI evaluation"}
           </button>}
-          {canRetry && <button type="button" onClick={() => handleEvaluationRequest(true)} disabled={submitting} aria-busy={submitting} className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-60 sm:w-auto">
+          {canRetry && !checkStatus && <button type="button" onClick={() => handleEvaluationRequest(true)} disabled={submitting} aria-busy={submitting} className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-60 sm:w-auto">
             {submitting && <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />}
             {submitting ? "Retrying evaluation..." : "Retry evaluation"}
           </button>}
-          {status === "pending" && <span className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border theme-border px-4 py-2 text-sm font-semibold theme-text-secondary sm:w-auto" role="status"><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-border-highlight theme-spinner-active" />Evaluating answers...</span>}
-          {status === "failed" && !canRetry && <span className="text-sm theme-text-secondary">Retry limit reached for this result.</span>}
+          {status === "pending" && !checkStatus && <span className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border theme-border px-4 py-2 text-sm font-semibold theme-text-secondary sm:w-auto" role="status"><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-border-highlight theme-spinner-active" />Evaluating answers...</span>}
+          {status === "failed" && !canRetry && !checkStatus && <span className="text-sm theme-text-secondary">Retry limit reached for this result.</span>}
         </div>
         {actionError && <p className="mb-0 mt-4 rounded-xl border theme-border-error theme-error-surface px-4 py-3 text-sm theme-text-error" role="alert">{actionError}</p>}
+        {checkStatus && <button type="button" onClick={checkStatus} disabled={checkingStatus || submitting} aria-busy={checkingStatus} className="mt-4 min-h-10 rounded-xl border theme-border px-4 py-2.5 text-sm font-semibold theme-text-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:opacity-60">
+          {checkingStatus ? "Checking evaluation status..." : "Check evaluation status"}
+        </button>}
       </section>
 
       {status === "completed" && evaluation && (

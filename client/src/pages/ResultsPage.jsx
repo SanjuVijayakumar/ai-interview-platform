@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { getInterviewResults } from "../services/resultService.js";
 import { logoutUser } from "../services/authService.js";
@@ -17,23 +17,57 @@ function formatDate(value) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
 }
 
+function isCurrentResultCapability(capability) {
+  try {
+    return typeof capability?.fetch === "function" && capability.isCurrent() === true;
+  } catch {
+    return false;
+  }
+}
+
+function isTerminatedResultRequest(error) {
+  return error?.status === 401 || ["unauthorized", "stale-session", "cancelled"].includes(error?.category);
+}
+
+export function CapabilityBoundResultsPage({ capability }) {
+  const [origin] = useState(() => capability);
+  if (capability !== origin || !isCurrentResultCapability(origin)) {
+    return <p role="alert">The authentication session for your results is unavailable.</p>;
+  }
+  return <ResultsLifecycle capability={origin} />;
+}
+
 function ResultsPage() {
+  return <ResultsLifecycle />;
+}
+
+function ResultsLifecycle({ capability }) {
   const navigate = useNavigate();
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
 
-  useEffect(() => {
-    let active = true;
+  useLayoutEffect(() => {
+    const controller = new AbortController();
+    const isActive = () => !controller.signal.aborted && (!capability || isCurrentResultCapability(capability));
     async function loadResults() {
-      setLoading(true);
-      setError("");
+      if (!isActive()) return;
       try {
-        const items = await getInterviewResults();
-        if (active) setResults(items);
+        const items = capability
+          ? await getInterviewResults({ capability, signal: controller.signal })
+          : await getInterviewResults();
+        if (isActive()) setResults(items);
       } catch (requestError) {
-        if (!active) return;
+        if (!isActive()) return;
+        if (capability) {
+          if (!isTerminatedResultRequest(requestError)) {
+            setError(requestError.status === 403
+              ? "You do not have permission to view these results."
+              : "Your results could not be loaded.");
+          }
+          return;
+        }
         if (requestError.status === 401) {
           logoutUser();
           navigate("/login", { replace: true });
@@ -41,12 +75,18 @@ function ResultsPage() {
         }
         setError(requestError.message || "Your results could not be loaded.");
       } finally {
-        if (active) setLoading(false);
+        if (isActive()) setLoading(false);
       }
     }
-    loadResults();
-    return () => { active = false; };
-  }, [navigate, reload]);
+    queueMicrotask(loadResults);
+    return () => controller.abort();
+  }, [capability, navigate, reload]);
+
+  const retryLoading = () => {
+    setLoading(true);
+    setError("");
+    setReload((count) => count + 1);
+  };
 
   return (
     <div className="mx-auto w-full max-w-5xl space-y-6 sm:space-y-8">
@@ -68,7 +108,7 @@ function ResultsPage() {
         <section className="rounded-2xl border theme-border-error theme-error-surface p-6 text-center" role="alert">
           <h2 className="mb-2 font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">Results unavailable</h2>
           <p className="mb-5 text-sm theme-text-error">{error}</p>
-          <button type="button" onClick={() => setReload((count) => count + 1)} className="inline-flex min-h-10 items-center justify-center rounded-xl theme-primary-button px-4 py-2.5 text-sm font-semibold theme-text-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Try again</button>
+          <button type="button" onClick={retryLoading} className="inline-flex min-h-10 items-center justify-center rounded-xl theme-primary-button px-4 py-2.5 text-sm font-semibold theme-text-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Try again</button>
         </section>
       ) : results.length === 0 ? (
         <section className="rounded-2xl border theme-border theme-card-surface px-6 py-12 text-center sm:px-10">

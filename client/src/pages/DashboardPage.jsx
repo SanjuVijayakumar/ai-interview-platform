@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import InterviewPracticeStatusBadge from "../components/InterviewPracticeStatusBadge.jsx";
 import { logoutUser } from "../services/authService.js";
+import { AuthenticatedRequestError } from "../services/authenticatedRequest.js";
 import { getDashboardStats } from "../services/dashboardService.js";
 import { getInterviews } from "../services/interviewService.js";
 
@@ -55,7 +56,6 @@ function DashboardPage({ user }) {
   const [interviewsError, setInterviewsError] = useState("");
   const [interviewsRetry, setInterviewsRetry] = useState(0);
   const authenticationRedirected = useRef(false);
-  const firstName = user?.name?.trim().split(/\s+/)[0];
 
   useEffect(() => {
     let active = true;
@@ -113,6 +113,95 @@ function DashboardPage({ user }) {
     return () => { active = false; };
   }, [interviewsRetry, navigate]);
 
+  return (
+    <DashboardContent
+      {...{ user, stats, statsLoading, statsError, interviews, interviewsLoading, interviewsError }}
+      retryStats={() => setStatsRetry((count) => count + 1)}
+      retryInterviews={() => setInterviewsRetry((count) => count + 1)}
+    />
+  );
+}
+
+function isCurrentCapability(capability) {
+  try {
+    return capability !== null && typeof capability === "object" &&
+      typeof capability.fetch === "function" && capability.isCurrent() === true;
+  } catch {
+    return false;
+  }
+}
+
+export function CapabilityBoundDashboardPage({ capability, user }) {
+  const [originatingCapability] = useState(() => capability);
+  if (capability !== originatingCapability || !isCurrentCapability(originatingCapability)) {
+    return <p role="alert" className="theme-text-error">Your dashboard session is unavailable.</p>;
+  }
+  return <CapabilityDashboardLifecycle capability={originatingCapability} user={user} />;
+}
+
+function useDashboardRead(read, capability, initialValue, errorMessage) {
+  const [data, setData] = useState(initialValue);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const isActive = () => !signal.aborted && isCurrentCapability(capability);
+
+    async function load() {
+      if (!isActive()) return;
+      setLoading(true);
+      setError("");
+      try {
+        const result = await read({ capability, signal });
+        if (isActive()) setData(result);
+      } catch (requestError) {
+        if (!isActive()) return;
+        if (requestError instanceof AuthenticatedRequestError &&
+            ["unauthorized", "stale-session", "cancelled"].includes(requestError.category)) return;
+        setError(errorMessage);
+      } finally {
+        if (isActive()) setLoading(false);
+      }
+    }
+
+    void load();
+    return () => controller.abort();
+  }, [attempt, capability, errorMessage, read]);
+
+  return { data, loading, error, retry: () => setAttempt((count) => count + 1) };
+}
+
+function CapabilityDashboardLifecycle({ capability, user }) {
+  const stats = useDashboardRead(
+    getDashboardStats, capability, null, "We couldn't load your dashboard statistics. Please try again.",
+  );
+  const interviews = useDashboardRead(
+    getInterviews, capability, [], "We couldn't load your interviews. Please try again.",
+  );
+
+  return (
+    <DashboardContent
+      user={user}
+      stats={stats.data}
+      statsLoading={stats.loading}
+      statsError={stats.error}
+      retryStats={stats.retry}
+      interviews={interviews.data}
+      interviewsLoading={interviews.loading}
+      interviewsError={interviews.error}
+      retryInterviews={interviews.retry}
+    />
+  );
+}
+
+function DashboardContent({
+  user, stats, statsLoading, statsError, retryStats,
+  interviews, interviewsLoading, interviewsError, retryInterviews,
+}) {
+  const firstName = user?.name?.trim().split(/\s+/)[0];
   const statsUnavailable = Boolean(statsError) || !stats;
   const statValues = [
     { value: statsLoading ? "…" : statsUnavailable ? "—" : stats.totalInterviews, note: statsLoading ? "Loading your statistics" : statsUnavailable ? "Unavailable" : "From your interview history" },
@@ -166,7 +255,7 @@ function DashboardPage({ user }) {
         {statsError && (
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border theme-border-error theme-error-surface px-4 py-3" role="alert">
             <p className="mb-0 text-sm theme-text-error">{statsError}</p>
-            <button type="button" onClick={() => setStatsRetry((count) => count + 1)} className="rounded-lg border theme-border theme-card-surface px-3 py-2 text-sm font-semibold theme-text-primary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Retry statistics</button>
+            <button type="button" onClick={retryStats} className="rounded-lg border theme-border theme-card-surface px-3 py-2 text-sm font-semibold theme-text-primary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Retry statistics</button>
           </div>
         )}
       </section>
@@ -191,7 +280,7 @@ function DashboardPage({ user }) {
         ) : interviewsError ? (
           <div className="px-5 py-10 text-center sm:px-8" role="alert">
             <p className="mx-auto mb-4 max-w-xl rounded-xl border theme-border-error theme-error-surface px-4 py-3 text-sm theme-text-error">{interviewsError}</p>
-            <button type="button" onClick={() => setInterviewsRetry((count) => count + 1)} className="rounded-lg border theme-border theme-card-surface px-4 py-2 text-sm font-semibold theme-text-primary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Reload interviews</button>
+            <button type="button" onClick={retryInterviews} className="rounded-lg border theme-border theme-card-surface px-4 py-2 text-sm font-semibold theme-text-primary transition theme-hover-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Reload interviews</button>
           </div>
         ) : recentInterviews.length === 0 ? (
           <div className="flex flex-col items-center px-5 py-10 text-center sm:px-8 sm:py-14">

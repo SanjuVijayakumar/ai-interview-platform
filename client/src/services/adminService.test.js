@@ -40,7 +40,7 @@ describe("adminService", () => {
 
     expect(fetch).toHaveBeenCalledWith(
       "http://localhost:5000/api/admin/me",
-      expect.objectContaining({ method: "GET" }),
+      expect.objectContaining({ method: "GET", redirect: "error" }),
     );
   });
 
@@ -107,6 +107,18 @@ describe("adminService", () => {
       category: "network-error",
       message: "Could not connect to PrepX. Please try again.",
     });
+  });
+
+  it("handles a simulated administrator redirect rejection without retry or token fallback", async () => {
+    window.localStorage.setItem("token", "synthetic-other-token");
+    fetch.mockRejectedValueOnce(new TypeError(`Redirect rejected for ${TOKEN}`));
+    await expect(getAdminIdentity(TOKEN)).rejects.toMatchObject({
+      name: "AdminServiceError",
+      category: "network-error",
+      message: "Could not connect to PrepX. Please try again.",
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem("token")).toBe("synthetic-other-token");
   });
 
   it("rejects a response that cannot be parsed as JSON", async () => {

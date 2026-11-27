@@ -70,6 +70,7 @@ export async function getAdminIdentity(token, { signal } = {}) {
       method: "GET",
       headers: { Authorization: `Bearer ${token}` },
       signal,
+      redirect: "error",
     });
   } catch (error) {
     if (isCancellation(error, signal)) throw createCancellationError();

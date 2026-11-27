@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import InterviewPracticeStatusBadge from "../components/InterviewPracticeStatusBadge.jsx";
 import { createInterview, deleteInterview, getInterviews, updateInterview } from "../services/interviewService.js";
@@ -16,7 +16,40 @@ function displayStatus(status) {
   return status?.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) || "Scheduled";
 }
 
+function isCurrentCapability(capability) {
+  try {
+    return capability !== null && typeof capability === "object" &&
+      typeof capability.fetch === "function" && capability.isCurrent() === true;
+  } catch {
+    return false;
+  }
+}
+
+function mutationFeedback(error, action) {
+  if (error.category === "unauthorized" || error.category === "stale-session") return null;
+  if (error.category === "http-error") {
+    if (error.status === 400) return { message: "The interview details were rejected. Check the values and try again." };
+    if (error.status === 403) return { message: `You don't have permission to ${action} this interview.` };
+    if (error.status === 404) return { message: "This interview is no longer available.", reload: true };
+    if (error.status === 409) return { message: "This interview changed. Reload the list before trying again.", reload: true };
+  }
+  const outcome = action === "delete" ? "deleted" : "saved";
+  return { message: `We couldn't confirm whether the interview was ${outcome}. Reload the list to check before trying again.`, reload: true };
+}
+
+export function CapabilityBoundInterviewsPage({ capability }) {
+  const [originatingCapability] = useState(() => capability);
+  if (capability !== originatingCapability || !isCurrentCapability(originatingCapability)) {
+    return <p role="alert" className="theme-text-error">Your interview session is unavailable.</p>;
+  }
+  return <InterviewsLifecycle capability={originatingCapability} />;
+}
+
 function InterviewsPage() {
+  return <InterviewsLifecycle />;
+}
+
+function InterviewsLifecycle({ capability }) {
   const [interviews, setInterviews] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -28,22 +61,58 @@ function InterviewsPage() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
   const [notice, setNotice] = useState("");
-  const [deletingId, setDeletingId] = useState("");
+  const [deletingIds, setDeletingIds] = useState(() => new Set());
+  const [deleteError, setDeleteError] = useState("");
+  const [formRecovery, setFormRecovery] = useState(false);
+  const lifecycleRef = useRef(null);
 
-  const loadInterviews = useCallback(async () => {
+  useLayoutEffect(() => {
+    if (!capability) return;
+    const lifecycle = { controller: new AbortController(), list: null, saving: false, deleting: new Set() };
+    lifecycleRef.current = lifecycle;
+    return () => {
+      lifecycleRef.current = null;
+      lifecycle.controller.abort();
+      lifecycle.list?.abort();
+    };
+  }, [capability]);
+
+  const isActive = useCallback((lifecycle) => (
+    !capability || Boolean(lifecycle && lifecycleRef.current === lifecycle &&
+      !lifecycle.controller.signal.aborted && isCurrentCapability(capability))
+  ), [capability]);
+
+  const loadInterviews = useCallback(async (afterMutation = false) => {
+    const lifecycle = lifecycleRef.current;
+    if (!isActive(lifecycle)) return;
+    const read = capability ? new AbortController() : null;
+    if (read) {
+      lifecycle.list?.abort();
+      lifecycle.list = read;
+    }
+    const canApply = () => isActive(lifecycle) && (!read || (lifecycle.list === read && !read.signal.aborted));
     setLoading(true);
     setLoadError("");
+    setDeleteError("");
     try {
-      const items = await getInterviews();
-      setInterviews(items);
+      const items = capability ? await getInterviews({ capability, signal: read.signal }) : await getInterviews();
+      if (canApply()) setInterviews(items);
     } catch (error) {
-      setLoadError(error.message || "We couldn't load your interviews. Please try again.");
+      if (!canApply()) return;
+      if (capability && ["unauthorized", "stale-session", "cancelled"].includes(error.category)) return;
+      const fallback = "We couldn't load your interviews. Please try again.";
+      if (!capability) setLoadError(error.message || fallback);
+      else setLoadError(afterMutation ? "Your change succeeded, but the interview list couldn't be refreshed." : fallback);
     } finally {
-      setLoading(false);
+      if (canApply()) setLoading(false);
     }
-  }, []);
+  }, [capability, isActive]);
 
-  useEffect(() => { loadInterviews(); }, [loadInterviews]);
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => { if (active) void loadInterviews(); });
+    return () => { active = false; };
+  }, [loadInterviews]);
 
   const filteredInterviews = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -55,13 +124,16 @@ function InterviewsPage() {
   }, [interviews, search, difficultyFilter]);
 
   const openCreate = () => {
+    if (lifecycleRef.current?.saving) return;
     setEditingInterview(null);
     setForm(blankForm);
     setFormError("");
+    setFormRecovery(false);
     setModalOpen(true);
   };
 
   const openEdit = (interview) => {
+    if (lifecycleRef.current?.saving) return;
     setEditingInterview(interview);
     setForm({
       title: interview.title || "",
@@ -70,18 +142,22 @@ function InterviewsPage() {
       status: interview.status || "scheduled",
     });
     setFormError("");
+    setFormRecovery(false);
     setModalOpen(true);
   };
 
   const closeModal = () => {
-    if (saving) return;
+    if (saving || lifecycleRef.current?.saving) return;
     setModalOpen(false);
     setFormError("");
   };
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    const lifecycle = lifecycleRef.current;
+    if (!isActive(lifecycle) || lifecycle?.saving) return;
     setFormError("");
+    setFormRecovery(false);
     const title = form.title.trim();
     const category = form.category.trim();
     if (!title || !category) {
@@ -97,38 +173,72 @@ function InterviewsPage() {
       return;
     }
 
+    const id = editingInterview?._id;
+    const payload = { title, category, difficulty: form.difficulty };
+    if (editingInterview) payload.status = form.status;
+    if (lifecycle) lifecycle.saving = true;
     setSaving(true);
     try {
-      const payload = { title, category, difficulty: form.difficulty };
-      if (editingInterview) payload.status = form.status;
-      if (editingInterview) {
+      if (capability) {
+        const options = { capability, signal: lifecycle.controller.signal };
+        if (editingInterview) await updateInterview(id, payload, options);
+        else await createInterview(payload, options);
+      } else if (editingInterview) {
         await updateInterview(editingInterview._id, payload);
       } else {
         await createInterview(payload);
       }
+      if (!isActive(lifecycle)) return;
       setModalOpen(false);
       setNotice(editingInterview ? "Interview updated." : "Interview created.");
-      await loadInterviews();
+      await loadInterviews(true);
     } catch (error) {
-      setFormError(error.message || "We couldn't save this interview. Please try again.");
+      if (!isActive(lifecycle)) return;
+      if (capability) {
+        const feedback = mutationFeedback(error, "save");
+        if (feedback) {
+          setFormError(feedback.message);
+          setFormRecovery(Boolean(feedback.reload));
+        }
+      } else setFormError(error.message || "We couldn't save this interview. Please try again.");
     } finally {
-      setSaving(false);
+      if (isActive(lifecycle)) {
+        if (lifecycle) lifecycle.saving = false;
+        setSaving(false);
+      }
     }
   };
 
   const handleDelete = async (interview) => {
+    const lifecycle = lifecycleRef.current;
+    const id = interview._id;
+    if (!isActive(lifecycle) || lifecycle?.deleting.has(id)) return;
+    if (lifecycle) lifecycle.deleting.add(id);
     const confirmed = window.confirm(`Delete “${interview.title}”? This action cannot be undone.`);
-    if (!confirmed) return;
-    setDeletingId(interview._id);
+    if (!confirmed || !isActive(lifecycle)) {
+      lifecycle?.deleting.delete(id);
+      return;
+    }
+    setDeletingIds(new Set(lifecycle ? lifecycle.deleting : [id]));
+    setDeleteError("");
     setNotice("");
     try {
-      await deleteInterview(interview._id);
+      if (capability) await deleteInterview(id, { capability, signal: lifecycle.controller.signal });
+      else await deleteInterview(id);
+      if (!isActive(lifecycle)) return;
       setNotice("Interview deleted.");
-      await loadInterviews();
+      await loadInterviews(true);
     } catch (error) {
-      setLoadError(error.message || "We couldn't delete this interview. Please try again.");
+      if (!isActive(lifecycle)) return;
+      if (capability) {
+        const feedback = mutationFeedback(error, "delete");
+        if (feedback) setDeleteError(feedback.message);
+      } else setLoadError(error.message || "We couldn't delete this interview. Please try again.");
     } finally {
-      setDeletingId("");
+      if (isActive(lifecycle)) {
+        lifecycle?.deleting.delete(id);
+        setDeletingIds(new Set(lifecycle?.deleting));
+      }
     }
   };
 
@@ -147,6 +257,12 @@ function InterviewsPage() {
       </section>
 
       {notice && <p className="mb-0 rounded-xl border theme-border-success theme-success-surface px-4 py-3 text-sm theme-text-success" role="status">{notice}</p>}
+      {deleteError && (
+        <section className="rounded-xl border theme-border-error theme-error-surface p-4" role="alert">
+          <p className="mb-2 text-sm theme-text-error">{deleteError}</p>
+          <button type="button" onClick={() => loadInterviews()} className="text-sm font-semibold theme-text-accent">Reload interviews</button>
+        </section>
+      )}
 
       <section className="rounded-2xl border theme-border theme-card-surface p-5 shadow-sm sm:p-6" aria-label="Interview list controls">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
@@ -174,7 +290,7 @@ function InterviewsPage() {
       {loadError ? (
         <section className="rounded-2xl border theme-border-error theme-error-surface p-6 text-center" role="alert">
           <p className="mb-4 text-sm theme-text-error">{loadError}</p>
-          <button type="button" onClick={loadInterviews} className="rounded-lg border theme-border-error theme-card-surface px-4 py-2 text-sm font-semibold theme-text-error transition theme-hover-error-surface">Try again</button>
+          <button type="button" onClick={() => loadInterviews()} className="rounded-lg border theme-border-error theme-card-surface px-4 py-2 text-sm font-semibold theme-text-error transition theme-hover-error-surface">{capability ? "Reload interviews" : "Try again"}</button>
         </section>
       ) : loading ? (
         <section className="flex min-h-64 items-center justify-center gap-3 rounded-2xl border theme-border theme-card-surface text-sm theme-text-secondary" role="status">
@@ -213,7 +329,7 @@ function InterviewsPage() {
                 <div className="flex shrink-0 flex-wrap gap-2 sm:flex-col">
                   <Link to={`/interviews/${encodeURIComponent(interview._id)}`} className="inline-flex min-h-9 items-center justify-center rounded-lg theme-primary-button px-3 py-2 text-xs font-semibold theme-text-primary shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">View Details</Link>
                   <button type="button" onClick={() => openEdit(interview)} className="rounded-lg border theme-border px-3 py-2 text-xs font-semibold theme-text-primary transition theme-hover-border theme-hover-surface theme-hover-text-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring">Edit</button>
-                  <button type="button" onClick={() => handleDelete(interview)} disabled={deletingId === interview._id} className="rounded-lg border theme-border-error px-3 py-2 text-xs font-semibold theme-text-error transition theme-hover-error-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-error-ring disabled:cursor-wait disabled:opacity-60">{deletingId === interview._id ? "Deleting…" : "Delete"}</button>
+                  <button type="button" onClick={() => handleDelete(interview)} disabled={deletingIds.has(interview._id)} className="rounded-lg border theme-border-error px-3 py-2 text-xs font-semibold theme-text-error transition theme-hover-error-surface focus-visible:outline-none focus-visible:ring-2 theme-focus-error-ring disabled:cursor-wait disabled:opacity-60">{deletingIds.has(interview._id) ? "Deleting…" : "Delete"}</button>
                 </div>
               </div>
             </article>
@@ -237,6 +353,7 @@ function InterviewsPage() {
               <label className="block"><span className="mb-1.5 block text-sm font-semibold theme-text-primary">Difficulty</span><select required value={form.difficulty} onChange={(event) => setForm((current) => ({ ...current, difficulty: event.target.value }))} className="h-11 w-full rounded-xl border theme-border theme-card-surface px-3 text-sm outline-none transition theme-input-focus focus:ring-2 theme-input-focus">{difficulties.map((difficulty) => <option key={difficulty}>{difficulty}</option>)}</select></label>
               {editingInterview && <label className="block"><span className="mb-1.5 block text-sm font-semibold theme-text-primary">Manual interview status</span><select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))} className="h-11 w-full rounded-xl border theme-border theme-card-surface px-3 text-sm outline-none transition theme-input-focus focus:ring-2 theme-input-focus">{statuses.map((status) => <option key={status} value={status}>{displayStatus(status)}</option>)}</select><span className="mt-1.5 block text-xs leading-5 theme-text-muted">Manually managed; practice progress is calculated from mock sessions.</span></label>}
               {formError && <p className="mb-0 rounded-lg border theme-border-error theme-error-surface px-3 py-2.5 text-sm theme-text-error" role="alert">{formError}</p>}
+              {formRecovery && <button type="button" onClick={() => loadInterviews()} className="text-sm font-semibold theme-text-accent">Reload interviews</button>}
               <div className="flex flex-col-reverse gap-2 border-t theme-border-subtle pt-4 sm:flex-row sm:justify-end">
                 <button type="button" onClick={closeModal} disabled={saving} className="rounded-xl border theme-border px-4 py-2.5 text-sm font-semibold theme-text-secondary transition theme-hover-surface disabled:opacity-50">Cancel</button>
                 <button type="submit" disabled={saving} className="inline-flex items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-2.5 text-sm font-semibold theme-text-primary transition theme-hover-primary disabled:cursor-wait disabled:opacity-60">{saving && <span className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />}{saving ? "Saving…" : editingInterview ? "Save changes" : "Create interview"}</button>

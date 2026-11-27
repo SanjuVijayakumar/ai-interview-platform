@@ -1,19 +1,47 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { ScrambleTextPlugin } from "gsap/ScrambleTextPlugin";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import { loginUser } from "../services/authService.js";
 import "../App.css";
 import leftImage from "../assets/login-left.jpg";
 
 gsap.registerPlugin(ScrambleTextPlugin);
 
+const loginErrors = {
+  "invalid-credentials": "Invalid email or password.",
+  "network-error": "Could not connect to PrepX. Please try again.",
+  "malformed-response": "PrepX returned an invalid login response. Please try again.",
+  "verification-error": "We could not verify your session. Please try signing in again.",
+};
+
+export function ProviderBoundLoginPage({ healthMessage, onVerifiedLogin, onSubmissionChange }) {
+  const { login } = useAuth();
+  return (
+    <LoginForm
+      healthMessage={healthMessage}
+      authenticate={login}
+      onLogin={onVerifiedLogin}
+      onSubmissionChange={onSubmissionChange}
+      prepared
+    />
+  );
+}
+
 function LoginPage({ onLogin, healthMessage }) {
+  return <LoginForm onLogin={onLogin} healthMessage={healthMessage} authenticate={loginUser} />;
+}
+
+function LoginForm({ onLogin, healthMessage, authenticate, prepared, onSubmissionChange }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const promoRef = useRef(null);
+  const submission = useRef(null);
+
+  useLayoutEffect(() => () => { submission.current = null; }, []);
 
   useEffect(() => {
     const context = gsap.context(() => {
@@ -32,6 +60,7 @@ function LoginPage({ onLogin, healthMessage }) {
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    if (prepared && submission.current) return;
     setError("");
 
     if (!email.trim() || !password) {
@@ -39,14 +68,31 @@ function LoginPage({ onLogin, healthMessage }) {
       return;
     }
 
+    const attempt = {};
+    submission.current = attempt;
+    const active = () => !prepared || submission.current === attempt;
+    let handedOff = false;
+    onSubmissionChange?.(attempt, true);
     setLoading(true);
     try {
-      await loginUser({ email: email.trim(), password });
-      onLogin();
+      const result = await authenticate({ email: email.trim(), password });
+      if (active() && (!prepared || (result.status === "authenticated" && result.isCurrent()))) {
+        if (prepared) onLogin(attempt);
+        else onLogin();
+        handedOff = prepared;
+      }
     } catch (loginError) {
-      setError(loginError.message || "Unable to log in. Please try again.");
+      if (active()) {
+        const message = prepared ? loginErrors[loginError?.category] : loginError.message;
+        setError(message || "Unable to log in. Please try again.");
+      }
     } finally {
-      setLoading(false);
+      if (active() && !handedOff) {
+        submission.current = null;
+        setLoading(false);
+        // Only the owning form may release an unsuccessful submission.
+        onSubmissionChange?.(attempt, false);
+      }
     }
   };
 

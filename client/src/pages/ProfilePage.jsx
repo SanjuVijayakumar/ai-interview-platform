@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useAuth } from "../contexts/AuthContext.jsx";
 import { getAuthToken } from "../services/authService.js";
+import { getProfile, updateProfile } from "../services/profileService.js";
 import "../App.css";
 
 const PROFILE_URL = "http://localhost:5000/api/auth/profile";
@@ -21,6 +23,159 @@ function errorMessageFromApi(data) {
     return Object.values(data.errors).flat().map((error) => typeof error === "string" ? error : error.message || error.msg || "").filter(Boolean).join(" ");
   }
   return data.message || data.error || "We couldn’t save your profile. Please check your details and try again.";
+}
+
+function isCurrentCapability(capability) {
+  try {
+    return typeof capability?.fetch === "function" && capability.isCurrent() === true;
+  } catch {
+    return false;
+  }
+}
+
+export function CapabilityBoundProfilePage({ capability, healthMessage }) {
+  const [origin] = useState(() => capability);
+  if (origin !== capability || !isCurrentCapability(origin)) {
+    return <p role="alert">The authentication session for your profile is unavailable.</p>;
+  }
+  return <ProfileLifecycle capability={origin} healthMessage={healthMessage} />;
+}
+
+function ProfileLifecycle({ capability, healthMessage }) {
+  const { verifySession } = useAuth();
+  const [profile, setProfile] = useState(null);
+  const [savedProfile, setSavedProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState({});
+  const [reload, setReload] = useState(0);
+  const [needsRecovery, setNeedsRecovery] = useState(false);
+  const operation = useRef(null);
+
+  useLayoutEffect(() => () => {
+    operation.current?.abort();
+    operation.current = null;
+  }, []);
+
+  useLayoutEffect(() => {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const active = () => !signal.aborted && isCurrentCapability(capability);
+    queueMicrotask(async () => {
+      if (!active()) return;
+      try {
+        const user = await getProfile({ capability, signal });
+        if (!active()) return;
+        const loaded = profileFromApi(user);
+        setProfile(loaded);
+        setSavedProfile(loaded);
+        setNeedsRecovery(false);
+        setNotice(reload ? { type: "success", text: "Current profile details loaded." } : {});
+      } catch (error) {
+        if (!active()) return;
+        setNotice({ type: "error", text: error.status === 403
+          ? "You do not have permission to view this profile."
+          : "We could not load your profile." });
+      } finally {
+        if (active()) setLoading(false);
+      }
+    });
+    return () => controller.abort();
+  }, [capability, reload]);
+
+  const reloadProfile = () => {
+    if (operation.current || !isCurrentCapability(capability)) return;
+    setLoading(true);
+    setReload((count) => count + 1);
+  };
+
+  const saveChanges = async (event) => {
+    event.preventDefault();
+    if (!profile || needsRecovery || operation.current || !isCurrentCapability(capability)) return;
+    const submitted = profile;
+    const name = submitted.name.trim();
+    const experience = Number(submitted.experience);
+    const targetRole = submitted.targetRole.trim();
+    if (!name || !submitted.experience.trim() || !Number.isFinite(experience) || experience < 0) {
+      setNotice({ type: "error", text: !name
+        ? "Enter your full name."
+        : "Enter a valid, non-negative number of years for experience." });
+      return;
+    }
+    if (!targetRole && savedProfile.targetRole) {
+      setNotice({ type: "error", text: "Enter a target role." });
+      return;
+    }
+    const updates = {
+      name,
+      skills: submitted.skills.split(",").map((skill) => skill.trim()).filter(Boolean),
+      experience,
+      ...(targetRole ? { targetRole } : {}),
+    };
+    const controller = new AbortController();
+    operation.current = controller;
+    const active = () => operation.current === controller && isCurrentCapability(capability);
+    setSaving(true);
+    setNotice({});
+    try {
+      let user;
+      try {
+        user = await updateProfile(updates, { capability, signal: controller.signal });
+      } catch (error) {
+        if (!active()) return;
+        const rejected = [400, 403, 404, 422].includes(error.status);
+        setNeedsRecovery(!rejected);
+        setNotice({ type: "error", text: error.status === 403
+          ? "You do not have permission to update this profile."
+          : rejected
+            ? "We could not save your profile. Check your details and try again."
+            : "We could not confirm the save. Reload your profile to review the current details before saving again." });
+        return;
+      }
+      if (!active()) return;
+      const updated = profileFromApi(user);
+      setSavedProfile(updated);
+      setProfile((current) => current === submitted ? updated : current);
+      setNotice({ type: "success", text: "Your profile has been updated successfully." });
+
+      let verified;
+      try {
+        verified = await verifySession();
+        if (!active()) return;
+        // A background GET started before the PATCH can be shared by verifySession.
+        if (verified.status === "authenticated" && !verified.error && verified.user.name !== user.name) {
+          verified = await verifySession();
+        }
+      } catch {
+        verified = null;
+      }
+      if (!active()) return;
+      if (verified?.error || verified?.user?.name !== user.name) {
+        setNotice({ type: "success", text: "Your profile was saved. We could not confirm the refreshed account identity." });
+      }
+    } finally {
+      if (active()) {
+        operation.current = null;
+        setSaving(false);
+      }
+    }
+  };
+
+  return (
+    <ProfileView
+      healthMessage={healthMessage} profile={profile} loading={loading} saving={saving}
+      notice={notice} saveChanges={saveChanges} needsRecovery={needsRecovery}
+      reloadProfile={reloadProfile}
+      updateField={(field) => (event) => {
+        const value = event.target.value;
+        setProfile((current) => ({ ...current, [field]: value }));
+      }}
+      cancelChanges={() => {
+        setProfile(savedProfile);
+        if (!needsRecovery) setNotice({});
+      }}
+    />
+  );
 }
 
 function ProfilePage({ healthMessage, onLogout }) {
@@ -133,6 +288,18 @@ function ProfilePage({ healthMessage, onLogout }) {
     }
   };
 
+  return (
+    <ProfileView
+      healthMessage={healthMessage} profile={profile} loading={loading} saving={saving}
+      notice={notice} saveChanges={saveChanges} updateField={updateField} cancelChanges={cancelChanges}
+    />
+  );
+}
+
+function ProfileView({
+  healthMessage, profile, loading, saving, notice, saveChanges, updateField, cancelChanges,
+  needsRecovery, reloadProfile,
+}) {
   const initials = profile?.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "U";
 
   return (
@@ -210,12 +377,15 @@ function ProfilePage({ healthMessage, onLogout }) {
               </div>
               <div className="form-actions">
                 <button className="button button-secondary" type="button" onClick={cancelChanges} disabled={saving}>Cancel</button>
-                <button className="button button-primary" type="submit" disabled={saving}>
+                <button className="button button-primary" type="submit" disabled={saving || needsRecovery}>
                   {saving && <span className="button-spinner" aria-hidden="true" />}{saving ? "Saving…" : "Save Changes"}
                 </button>
               </div>
               {notice.text && <p className={`form-notice notice-${notice.type}`} role={notice.type === "error" ? "alert" : "status"}>{notice.text}</p>}
             </form>
+          )}
+          {!loading && reloadProfile && (!profile || needsRecovery) && (
+            <button className="button button-secondary" type="button" onClick={reloadProfile}>Reload profile</button>
           )}
         </div>
       </section>

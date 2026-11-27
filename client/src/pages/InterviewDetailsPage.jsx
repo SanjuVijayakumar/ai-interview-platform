@@ -1,11 +1,35 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import InterviewPracticeStatusBadge from "../components/InterviewPracticeStatusBadge.jsx";
 import { getInterviewById } from "../services/interviewService.js";
 import { createQuestion, deleteQuestion, generateInterviewQuestions, getQuestions, updateQuestion } from "../services/questionService.js";
 import { createMockSession, findInProgressMockSession } from "../services/mockSessionService.js";
+import { AuthenticatedRequestError } from "../services/authenticatedRequest.js";
 
 const blankQuestionForm = { questionText: "", category: "", difficulty: "Beginner", order: "1", expectedAnswer: "" };
+const terminalCategories = new Set(["unauthorized", "stale-session", "cancelled", "missing-capability", "invalid-capability"]);
+const generationMessages = {
+  400: "Check question generation preferences.",
+  404: "Interview unavailable.",
+  429: "AI service rate limit reached.",
+  502: "AI question generation could not be completed.",
+  503: "AI question service temporarily unavailable.",
+  504: "AI question request timed out.",
+};
+
+function isTerminated(error) {
+  return error?.status === 401 || terminalCategories.has(error?.category);
+}
+
+function safeErrorMessage(error, fallback, messages = {}) {
+  if (error?.status === 403) return "Permission denied for this operation.";
+  return messages[error?.status] || fallback;
+}
+
+function isUncertainWrite(error) {
+  return error?.status >= 500 || ["network-error", "request-error", "body-read-error", "malformed-response"].includes(error?.category);
+}
+
 const difficulties = ["Beginner", "Intermediate", "Advanced"];
 
 function formatDate(value) {
@@ -29,16 +53,223 @@ function DetailItem({ label, children }) {
   );
 }
 
-function InterviewDetailsPage() {
+function canUseCapability(credentials) {
+  if (!credentials) return true;
+  const { capability } = credentials;
+  try {
+    return capability !== null && typeof capability === "object" &&
+      typeof capability.fetch === "function" && capability.isCurrent() === true;
+  } catch {
+    return false;
+  }
+}
+
+function lookupSession(interviewId, credentials) {
+  if (!canUseCapability(credentials)) throw new AuthenticatedRequestError("stale-session");
+  return credentials
+    ? findInProgressMockSession(interviewId, credentials)
+    : findInProgressMockSession(interviewId);
+}
+
+function isMissingSession(error, credentials) {
+  return error?.status === 404 && (credentials
+    ? error.category === "http-error" && error.data?.errorCode === "no_in_progress_session"
+    : /no in-progress session/i.test(error.message));
+}
+
+function useMockInterview(interviewId, navigate, credentials, cancelOnUnmount = false) {
+  const lifecycleRef = useRef(null);
+
+  useLayoutEffect(() => {
+    const controller = new AbortController();
+    lifecycleRef.current = controller;
+    return () => {
+      lifecycleRef.current = null;
+      controller.abort();
+    };
+  }, [interviewId]);
+
+  const [inProgressSession, setInProgressSession] = useState(null);
+  const [sessionLookupLoading, setSessionLookupLoading] = useState(Boolean(interviewId));
+  const [sessionActionLoading, setSessionActionLoading] = useState(false);
+  const [sessionError, setSessionError] = useState("");
+  const sessionActionInProgress = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    const lifecycle = lifecycleRef.current;
+    const isActive = () => active && (!credentials || lifecycleRef.current === lifecycle);
+    const options = cancelOnUnmount && lifecycle ? { ...credentials, signal: lifecycle.signal } : credentials;
+
+    async function checkInProgressSession() {
+      try {
+        const session = await lookupSession(interviewId, options);
+        if (isActive() && canUseCapability(credentials)) setInProgressSession(session);
+      } catch (requestError) {
+        if (!isActive()) return;
+        if (!canUseCapability(credentials) && requestError.category !== "stale-session") return;
+        if (isMissingSession(requestError, credentials)) return;
+        const message = requestError.message || "Unable to check for an in-progress mock interview.";
+        if (!credentials && (requestError.status === 401 || /session is missing|authentication|token|access denied|sign in/i.test(message))) {
+          navigate("/login", { replace: true });
+          return;
+        }
+        setSessionError(message);
+      } finally {
+        if (isActive()) setSessionLookupLoading(false);
+      }
+    }
+
+    if (interviewId) checkInProgressSession();
+
+    return () => { active = false; };
+  }, [interviewId, navigate, credentials, cancelOnUnmount]);
+
+  const handleStartOrResumeMockInterview = async () => {
+    if (sessionActionInProgress.current || !interviewId) return;
+    const lifecycle = lifecycleRef.current;
+    const isActive = () => !credentials || (lifecycle !== null && lifecycleRef.current === lifecycle);
+    const isCurrent = () => isActive() && canUseCapability(credentials);
+    if (!isCurrent()) return;
+    const options = cancelOnUnmount ? { ...credentials, signal: lifecycle.signal } : credentials;
+    sessionActionInProgress.current = true;
+    setSessionActionLoading(true);
+    setSessionError("");
+
+    try {
+      let session;
+      let missingSession = false;
+      try {
+        session = await lookupSession(interviewId, options);
+      } catch (lookupError) {
+        if (!isMissingSession(lookupError, credentials)) throw lookupError;
+        missingSession = true;
+      }
+
+      if (!isCurrent()) return;
+      if (missingSession || (!credentials && !session)) {
+        session = credentials
+          ? await createMockSession(interviewId, options)
+          : await createMockSession(interviewId);
+      }
+      if (!isCurrent()) return;
+      if (!session?._id) throw new Error("The mock interview session could not be opened. Please try again.");
+
+      setInProgressSession(session.status === "in-progress" ? session : null);
+      navigate(`/mock-session/${encodeURIComponent(session._id)}`, {
+        state: { interviewId },
+      });
+    } catch (requestError) {
+      if (!isCurrent()) return;
+      const message = requestError.message || "Unable to start the mock interview. Please try again.";
+      if (!credentials && (requestError.status === 401 || /session is missing|authentication|token|access denied|sign in/i.test(message))) {
+        navigate("/login", { replace: true });
+        return;
+      }
+      setSessionError(message);
+    } finally {
+      if (isActive()) {
+        sessionActionInProgress.current = false;
+        setSessionActionLoading(false);
+      }
+    }
+  };
+
+  return { inProgressSession, sessionLookupLoading, sessionActionLoading, sessionError, handleStartOrResumeMockInterview };
+}
+
+function MockInterviewControls({
+  inProgressSession,
+  sessionLookupLoading,
+  sessionActionLoading,
+  sessionError,
+  handleStartOrResumeMockInterview,
+  questionsLoading,
+  hasQuestions,
+}) {
+  return (
+    <section className="flex flex-col gap-4 rounded-2xl border theme-border-highlight theme-card-surface p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:p-6" aria-labelledby="mock-interview-heading">
+      <div className="min-w-0">
+        <p className="mb-1 text-xs font-bold uppercase tracking-[0.14em] theme-text-accent">MOCK INTERVIEW</p>
+        <h3 id="mock-interview-heading" className="mb-1 font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">Practice your interview</h3>
+        <p className="mb-0 text-sm leading-6 theme-text-secondary">Start a timed practice session with the questions saved for this interview.</p>
+      </div>
+      <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:min-w-52">
+        {inProgressSession ? (
+          <button type="button" onClick={handleStartOrResumeMockInterview} disabled={sessionActionLoading || sessionLookupLoading} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-70">
+            {sessionActionLoading ? <><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />Opening...</> : "Resume Mock Interview"}
+          </button>
+        ) : (
+          <button type="button" onClick={handleStartOrResumeMockInterview} disabled={sessionActionLoading || sessionLookupLoading || questionsLoading || !hasQuestions} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-70">
+            {sessionActionLoading || sessionLookupLoading ? <><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />{sessionActionLoading ? "Opening..." : "Checking sessions..."}</> : "Start Mock Interview"}
+          </button>
+        )}
+        {!questionsLoading && !hasQuestions && <p className="mb-0 text-center text-xs theme-text-muted">Add at least one question to start.</p>}
+      </div>
+      {sessionError && <p className="mb-0 w-full rounded-xl border theme-border-error theme-error-surface px-4 py-3 text-sm theme-text-error sm:basis-full" role="alert">{sessionError}</p>}
+    </section>
+  );
+}
+
+// The protected interview route supplies question availability from its own authenticated data.
+export function CapabilityBoundMockInterviewControls({ capability, questionsLoading, hasQuestions }) {
   const { interviewId } = useParams();
+  const [credentials] = useState(() => ({ capability }));
+  if (!Object.is(credentials.capability, capability)) {
+    return <p role="alert">The authentication session for this interview changed.</p>;
+  }
+  return (
+    <BoundMockInterviewLifecycle
+      key={interviewId}
+      interviewId={interviewId}
+      credentials={credentials}
+      questionsLoading={questionsLoading}
+      hasQuestions={hasQuestions}
+    />
+  );
+}
+
+function BoundMockInterviewLifecycle({ interviewId, credentials, questionsLoading, hasQuestions, cancelOnUnmount }) {
+  const navigate = useNavigate();
+  const practice = useMockInterview(interviewId, navigate, credentials, cancelOnUnmount);
+  return <MockInterviewControls {...practice} questionsLoading={questionsLoading} hasQuestions={hasQuestions} />;
+}
+
+function InterviewDetailsPage() {
+  return <InterviewDetailsRoute />;
+}
+
+export function CapabilityBoundInterviewDetailsPage({ capability }) {
+  const [credentials] = useState(() => ({ capability }));
+  if (credentials.capability !== capability || !canUseCapability(credentials)) {
+    return <p role="alert">The authentication session for this interview is unavailable.</p>;
+  }
+  return <InterviewDetailsRoute credentials={credentials} />;
+}
+
+function InterviewDetailsRoute({ credentials }) {
+  const { interviewId } = useParams();
+  const [generationCount, setGenerationCount] = useState("5");
+  const [generationCategory, setGenerationCategory] = useState("Technical");
+  const [customCategory, setCustomCategory] = useState("");
+  const generationPreferences = {
+    generationCount, setGenerationCount, generationCategory, setGenerationCategory, customCategory, setCustomCategory,
+  };
+  return <InterviewDetailsLifecycle key={interviewId} interviewId={interviewId} credentials={credentials} generationPreferences={generationPreferences} />;
+}
+
+function InterviewDetailsLifecycle({ interviewId, credentials, generationPreferences }) {
+  const {
+    generationCount, setGenerationCount, generationCategory, setGenerationCategory, customCategory, setCustomCategory,
+  } = generationPreferences;
   const location = useLocation();
   const navigate = useNavigate();
   const [interview, setInterview] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [questions, setQuestions] = useState([]);
-  const [questionsLoading, setQuestionsLoading] = useState(true);
-  const [questionsError, setQuestionsError] = useState("");
+  const [questionsLoading, setQuestionsLoading] = useState(Boolean(interviewId));
+  const [questionsError, setQuestionsError] = useState(interviewId ? "" : "An interview ID is required to load questions.");
   const [questionModalOpen, setQuestionModalOpen] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState(null);
   const [questionForm, setQuestionForm] = useState(blankQuestionForm);
@@ -47,10 +278,7 @@ function InterviewDetailsPage() {
   const [notice, setNotice] = useState(location.state?.notice || "");
   const [actionError, setActionError] = useState("");
   const [deletingQuestionId, setDeletingQuestionId] = useState("");
-  const [generationCount, setGenerationCount] = useState("5");
   const [generationDifficulty, setGenerationDifficulty] = useState("");
-  const [generationCategory, setGenerationCategory] = useState("Technical");
-  const [customCategory, setCustomCategory] = useState("");
   const [generatingQuestions, setGeneratingQuestions] = useState(false);
   const [generationError, setGenerationError] = useState("");
   const [generatedQuestions, setGeneratedQuestions] = useState([]);
@@ -59,60 +287,56 @@ function InterviewDetailsPage() {
   const [generatedSaveFailures, setGeneratedSaveFailures] = useState(() => new Map());
   const [savingGeneratedQuestions, setSavingGeneratedQuestions] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState({ type: "", message: "" });
-  const [inProgressSession, setInProgressSession] = useState(null);
-  const [sessionLookupLoading, setSessionLookupLoading] = useState(true);
-  const [sessionActionLoading, setSessionActionLoading] = useState(false);
-  const [sessionError, setSessionError] = useState("");
   const generationInProgress = useRef(false);
-  const generationRequestId = useRef(0);
   const saveInProgress = useRef(false);
-  const saveRequestId = useRef(0);
-  const sessionActionInProgress = useRef(false);
+  const manualWriteInProgress = useRef(false);
+  const questionReadId = useRef(0);
+  const lifecycleRef = useRef(null);
+  const practice = useMockInterview(credentials ? undefined : interviewId, navigate, null);
+
+  useLayoutEffect(() => {
+    const controller = new AbortController();
+    lifecycleRef.current = controller;
+    return () => {
+      lifecycleRef.current = null;
+      controller.abort();
+    };
+  }, []);
+
+  const isActive = useCallback((lifecycle) =>
+    lifecycle !== null && lifecycleRef.current === lifecycle && canUseCapability(credentials),
+  [credentials]);
+
+  const request = useCallback(async (lifecycle, service, ...args) => {
+    if (!isActive(lifecycle)) throw new AuthenticatedRequestError("cancelled");
+    const result = credentials
+      ? await service(...args, { capability: credentials.capability, signal: lifecycle.signal })
+      : await service(...args);
+    if (!isActive(lifecycle)) throw new AuthenticatedRequestError("cancelled");
+    return result;
+  }, [credentials, isActive]);
 
   useEffect(() => {
-    let active = true;
-    setInProgressSession(null);
-    setSessionError("");
-    setSessionLookupLoading(true);
-
-    async function checkInProgressSession() {
-      try {
-        const session = await findInProgressMockSession(interviewId);
-        if (active) setInProgressSession(session);
-      } catch (requestError) {
-        if (!active) return;
-        if (requestError.status === 404 && /no in-progress session/i.test(requestError.message)) return;
-        const message = requestError.message || "Unable to check for an in-progress mock interview.";
-        if (requestError.status === 401 || /session is missing|authentication|token|access denied|sign in/i.test(message)) {
-          navigate("/login", { replace: true });
-          return;
-        }
-        setSessionError(message);
-      } finally {
-        if (active) setSessionLookupLoading(false);
-      }
-    }
-
-    if (interviewId) checkInProgressSession();
-    else setSessionLookupLoading(false);
-
-    return () => { active = false; };
-  }, [interviewId, navigate]);
-
-  useEffect(() => {
-    let active = true;
+    const lifecycle = lifecycleRef.current;
 
     async function loadInterview() {
-      setLoading(true);
-      setError("");
-      setInterview(null);
-
       try {
-        const result = await getInterviewById(interviewId);
-        if (active) setInterview(result);
+        const result = await request(lifecycle, getInterviewById, interviewId);
+        if (!isActive(lifecycle)) return;
+        if (credentials && result._id !== interviewId) {
+          throw new AuthenticatedRequestError("malformed-response");
+        }
+        setInterview(result);
       } catch (requestError) {
-        if (!active) return;
-        const message = requestError.message || "Unable to load this interview. Please try again.";
+        if (!isActive(lifecycle)) return;
+        const fallback = "Unable to load this interview. Please try again.";
+        if (credentials) {
+          if (!isTerminated(requestError)) {
+            setError(safeErrorMessage(requestError, fallback, { 400: "This interview ID is invalid.", 404: "Interview unavailable." }));
+          }
+          return;
+        }
+        const message = requestError.message || fallback;
         if (/session is missing|authentication|token|access denied|sign in/i.test(message)) {
           navigate("/login", { replace: true });
           return;
@@ -125,47 +349,58 @@ function InterviewDetailsPage() {
           setError(message);
         }
       } finally {
-        if (active) setLoading(false);
+        if (isActive(lifecycle)) setLoading(false);
       }
     }
 
     loadInterview();
-    return () => { active = false; };
-  }, [interviewId, navigate]);
+  }, [credentials, interviewId, isActive, navigate, request]);
+
+  const readQuestions = useCallback(async (lifecycle) => {
+    const result = await request(lifecycle, getQuestions, interviewId);
+    if (credentials && result.some((question) => question.interview !== interviewId)) {
+      throw new AuthenticatedRequestError("malformed-response");
+    }
+    return result;
+  }, [credentials, interviewId, request]);
+
+  const loadQuestionList = useCallback(async (lifecycle, {
+    fallback = "Unable to load questions. Please try again.",
+    onError = setQuestionsError,
+    redirectLegacy = true,
+  } = {}) => {
+    const readId = ++questionReadId.current;
+    const acceptsResult = () => isActive(lifecycle) && readId === questionReadId.current;
+    try {
+      const result = await readQuestions(lifecycle);
+      if (!acceptsResult()) return { terminated: true };
+      setQuestions(result);
+      return { result };
+    } catch (error) {
+      if (!acceptsResult() || (credentials && isTerminated(error))) return { terminated: true };
+      const message = credentials ? safeErrorMessage(error, fallback) : error.message || fallback;
+      if (!credentials && redirectLegacy && /session is missing|authentication|token|access denied|sign in/i.test(message)) {
+        navigate("/login", { replace: true });
+        return { terminated: true };
+      }
+      onError(message);
+      return { error: message };
+    } finally {
+      if (acceptsResult()) setQuestionsLoading(false);
+    }
+  }, [credentials, isActive, navigate, readQuestions]);
 
   useEffect(() => {
-    let active = true;
+    const lifecycle = lifecycleRef.current;
+    if (interviewId) loadQuestionList(lifecycle);
+  }, [interviewId, loadQuestionList]);
 
-    async function loadQuestions() {
-      if (!interviewId) {
-        setQuestionsLoading(false);
-        setQuestionsError("An interview ID is required to load questions.");
-        return;
-      }
-
-      setQuestionsLoading(true);
-      setQuestionsError("");
-      setQuestions([]);
-
-      try {
-        const result = await getQuestions(interviewId);
-        if (active) setQuestions(result);
-      } catch (requestError) {
-        if (!active) return;
-        const message = requestError.message || "Unable to load questions. Please try again.";
-        if (/session is missing|authentication|token|access denied|sign in/i.test(message)) {
-          navigate("/login", { replace: true });
-          return;
-        }
-        setQuestionsError(message);
-      } finally {
-        if (active) setQuestionsLoading(false);
-      }
-    }
-
-    loadQuestions();
-    return () => { active = false; };
-  }, [interviewId, navigate]);
+  const reloadQuestionList = async (lifecycle, options) => {
+    if (!isActive(lifecycle)) return { terminated: true };
+    setQuestionsLoading(true);
+    setQuestionsError("");
+    return loadQuestionList(lifecycle, options);
+  };
 
   const sortedQuestions = [...questions].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   const selectedDifficulty = generationDifficulty || interview?.difficulty || "Intermediate";
@@ -176,22 +411,6 @@ function InterviewDetailsPage() {
     .filter((index) => !savedGeneratedQuestions.has(index)).length;
   const allGeneratedQuestionsSelected = selectableGeneratedQuestionIndices.length > 0 &&
     selectableGeneratedQuestionIndices.every((index) => selectedGeneratedQuestions.has(index));
-
-  useEffect(() => {
-    generationRequestId.current += 1;
-    generationInProgress.current = false;
-    saveRequestId.current += 1;
-    saveInProgress.current = false;
-    setGeneratingQuestions(false);
-    setSavingGeneratedQuestions(false);
-    setGeneratedQuestions([]);
-    setSelectedGeneratedQuestions(new Set());
-    setSavedGeneratedQuestions(new Set());
-    setGeneratedSaveFailures(new Map());
-    setSaveFeedback({ type: "", message: "" });
-    setGenerationError("");
-    setGenerationDifficulty("");
-  }, [interviewId]);
 
   const openQuestionModal = () => {
     setEditingQuestion(null);
@@ -241,89 +460,110 @@ function InterviewDetailsPage() {
       return;
     }
 
+    const lifecycle = lifecycleRef.current;
+    if (!isActive(lifecycle) || manualWriteInProgress.current || saveInProgress.current) return;
+    const questionId = editingQuestion?._id;
+    const fields = {
+      questionText, category, difficulty: questionForm.difficulty, order,
+      expectedAnswer: questionForm.expectedAnswer.trim(),
+    };
+
+    manualWriteInProgress.current = true;
     setQuestionSaving(true);
     setNotice("");
     try {
-      const editableFields = {
-        questionText,
-        category,
-        difficulty: questionForm.difficulty,
-        order,
-        expectedAnswer: questionForm.expectedAnswer.trim(),
-      };
       if (editingQuestion) {
-        await updateQuestion(editingQuestion._id, editableFields);
+        await request(lifecycle, updateQuestion, questionId, fields);
       } else {
-        await createQuestion({ ...editableFields, interview: interviewId });
+        await request(lifecycle, createQuestion, { ...fields, interview: interviewId });
       }
+      if (!isActive(lifecycle)) return;
       setQuestionModalOpen(false);
       setEditingQuestion(null);
       setQuestionForm(blankQuestionForm);
       setNotice(editingQuestion ? "Question updated successfully." : "Question created successfully.");
-      setQuestionsLoading(true);
-      setQuestionsError("");
-      try {
-        setQuestions(await getQuestions(interviewId));
-      } catch (refreshError) {
-        const message = refreshError.message || "Question was created, but the list could not be refreshed.";
-        if (/session is missing|authentication|token|access denied|sign in/i.test(message)) {
-          navigate("/login", { replace: true });
-          return;
-        }
-        setQuestionsError(message);
-      } finally {
-        setQuestionsLoading(false);
-      }
+      await reloadQuestionList(lifecycle, {
+        fallback: "Question was saved, but the list could not be refreshed.",
+      });
     } catch (requestError) {
-      const message = requestError.message || "Unable to create this question. Please try again.";
+      if (!isActive(lifecycle) || (credentials && isTerminated(requestError))) return;
+      const fallback = "Unable to create this question. Please try again.";
+      if (credentials) {
+        if (isUncertainWrite(requestError)) {
+          setQuestionModalOpen(false);
+          await recoverQuestionWrite(lifecycle);
+        } else {
+          setQuestionFormError(safeErrorMessage(requestError, fallback));
+        }
+        return;
+      }
+      const message = requestError.message || fallback;
       if (/session is missing|authentication|token|access denied|sign in/i.test(message)) {
         navigate("/login", { replace: true });
         return;
       }
       setQuestionFormError(message);
     } finally {
-      setQuestionSaving(false);
+      if (isActive(lifecycle)) {
+        manualWriteInProgress.current = false;
+        setQuestionSaving(false);
+      }
+    }
+  };
+
+  const recoverQuestionWrite = async (lifecycle) => {
+    const { terminated } = await reloadQuestionList(lifecycle, {
+      fallback: "The question list could not be refreshed.",
+    });
+    if (isActive(lifecycle) && !terminated) {
+      setActionError("The result of the question change could not be confirmed. Review the question list before making another change.");
     }
   };
 
   const handleDeleteQuestion = async (question) => {
-    const confirmed = window.confirm(`Delete “${question.questionText}”? This action cannot be undone.`);
-    if (!confirmed) return;
+    const lifecycle = lifecycleRef.current;
+    if (!isActive(lifecycle) || manualWriteInProgress.current || saveInProgress.current) return;
+    const questionId = question._id;
+    const confirmed = window.confirm(`Delete ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ${question.questionText}ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â? This action cannot be undone.`);
+    if (!confirmed || !isActive(lifecycle)) return;
 
-    setDeletingQuestionId(question._id);
+    manualWriteInProgress.current = true;
+    setDeletingQuestionId(questionId);
     setNotice("");
     setActionError("");
     try {
-      await deleteQuestion(question._id);
+      await request(lifecycle, deleteQuestion, questionId);
+      if (!isActive(lifecycle)) return;
       setNotice("Question deleted successfully.");
-      setQuestionsLoading(true);
-      setQuestionsError("");
-      try {
-        setQuestions(await getQuestions(interviewId));
-      } catch (refreshError) {
-        const message = refreshError.message || "Question was deleted, but the list could not be refreshed.";
-        if (/session is missing|authentication|token|access denied|sign in/i.test(message)) {
-          navigate("/login", { replace: true });
-          return;
-        }
-        setActionError(message);
-      } finally {
-        setQuestionsLoading(false);
-      }
+      await reloadQuestionList(lifecycle, {
+        fallback: "Question was deleted, but the list could not be refreshed.",
+        onError: credentials ? setQuestionsError : setActionError,
+      });
     } catch (requestError) {
-      const message = requestError.message || "Unable to delete this question. Please try again.";
+      if (!isActive(lifecycle) || (credentials && isTerminated(requestError))) return;
+      const fallback = "Unable to delete this question. Please try again.";
+      if (credentials) {
+        if (isUncertainWrite(requestError)) await recoverQuestionWrite(lifecycle);
+        else setActionError(safeErrorMessage(requestError, fallback));
+        return;
+      }
+      const message = requestError.message || fallback;
       if (/session is missing|authentication|token|access denied|sign in/i.test(message)) {
         navigate("/login", { replace: true });
         return;
       }
       setActionError(message);
     } finally {
-      setDeletingQuestionId("");
+      if (isActive(lifecycle)) {
+        manualWriteInProgress.current = false;
+        setDeletingQuestionId("");
+      }
     }
   };
 
   const handleGenerateQuestions = async () => {
-    if (generationInProgress.current || saveInProgress.current) return;
+    const lifecycle = lifecycleRef.current;
+    if (!isActive(lifecycle) || generationInProgress.current || saveInProgress.current) return;
 
     const count = Number(generationCount);
     if (!Number.isInteger(count) || count < 1 || count > 10) {
@@ -342,16 +582,15 @@ function InterviewDetailsPage() {
     }
 
     generationInProgress.current = true;
-    const requestId = ++generationRequestId.current;
     setGeneratingQuestions(true);
     setGenerationError("");
     try {
-      const result = await generateInterviewQuestions(interviewId, {
+      const result = await request(lifecycle, generateInterviewQuestions, interviewId, {
         count,
         difficulty: selectedDifficulty,
         category,
       });
-      if (requestId !== generationRequestId.current) return;
+      if (!isActive(lifecycle)) return;
       const validResult = result.length === count && result.every((question) =>
         question &&
         typeof question.questionText === "string" && question.questionText.trim() &&
@@ -369,7 +608,13 @@ function InterviewDetailsPage() {
       setGeneratedSaveFailures(new Map());
       setSaveFeedback({ type: "", message: "" });
     } catch (requestError) {
-      if (requestId !== generationRequestId.current) return;
+      if (!isActive(lifecycle)) return;
+      if (credentials) {
+        if (!isTerminated(requestError)) {
+          setGenerationError(safeErrorMessage(requestError, "Unable to generate questions. Please try again.", generationMessages));
+        }
+        return;
+      }
       const message = requestError.message || "Unable to generate questions. Please try again.";
       if (requestError.status === 401 || /session is missing|authentication token/i.test(message)) {
         setGenerationError("Your session has expired. Please sign in again.");
@@ -378,7 +623,7 @@ function InterviewDetailsPage() {
       }
       setGenerationError(message);
     } finally {
-      if (requestId === generationRequestId.current) {
+      if (isActive(lifecycle)) {
         generationInProgress.current = false;
         setGeneratingQuestions(false);
       }
@@ -386,7 +631,8 @@ function InterviewDetailsPage() {
   };
 
   const handleSaveSelectedQuestions = async () => {
-    if (saveInProgress.current) return;
+    const lifecycle = lifecycleRef.current;
+    if (!isActive(lifecycle) || saveInProgress.current || manualWriteInProgress.current || generationInProgress.current) return;
 
     const selectedIndices = [...selectedGeneratedQuestions]
       .filter((index) => !savedGeneratedQuestions.has(index))
@@ -396,15 +642,15 @@ function InterviewDetailsPage() {
       return;
     }
 
+    const preview = generatedQuestions;
     saveInProgress.current = true;
-    const requestId = ++saveRequestId.current;
     setSavingGeneratedQuestions(true);
     setSaveFeedback({ type: "", message: "" });
     setGeneratedSaveFailures(new Map());
 
     try {
-      const existingQuestions = await getQuestions(interviewId);
-      if (requestId !== saveRequestId.current) return;
+      const existingQuestions = await readQuestions(lifecycle);
+      if (!isActive(lifecycle)) return;
 
       let nextOrder = existingQuestions.reduce((highest, question) => {
         const order = Number(question.order);
@@ -416,17 +662,17 @@ function InterviewDetailsPage() {
       let orderStateUncertain = false;
 
       for (const index of selectedIndices) {
-        const generatedQuestion = generatedQuestions[index];
+        const generatedQuestion = preview[index];
         if (generatedQuestion && existingQuestions.some((question) => questionMatchesGenerated(question, generatedQuestion))) {
           successfulIndices.push(index);
         }
       }
 
       for (let position = 0; position < selectedIndices.length; position += 1) {
-        if (requestId !== saveRequestId.current) return;
+        if (!isActive(lifecycle)) return;
         const index = selectedIndices[position];
         if (successfulIndices.includes(index)) continue;
-        const question = generatedQuestions[index];
+        const question = preview[index];
         if (!question) {
           failedItems.push({ index, message: "This preview question is no longer available." });
           continue;
@@ -443,7 +689,7 @@ function InterviewDetailsPage() {
         }
 
         try {
-          await createQuestion({
+          await request(lifecycle, createQuestion, {
             interview: interviewId,
             questionText: question.questionText,
             category: question.category,
@@ -451,14 +697,22 @@ function InterviewDetailsPage() {
             expectedAnswer: question.expectedAnswer,
             order: nextOrder,
           });
+          if (!isActive(lifecycle)) return;
           successfulIndices.push(index);
           nextOrder += 1;
         } catch (saveError) {
-          const message = saveError.message || "This question could not be saved.";
+          if (!isActive(lifecycle) || (credentials && isTerminated(saveError))) return;
+          const fallback = "This question could not be saved.";
+          const message = credentials ? safeErrorMessage(saveError, fallback) : saveError.message || fallback;
+          if (credentials && !isUncertainWrite(saveError)) {
+            failedItems.push({ index, message });
+            continue;
+          }
+
           let confirmedSaved = false;
           try {
-            const currentQuestions = await getQuestions(interviewId);
-            if (requestId !== saveRequestId.current) return;
+            const currentQuestions = await readQuestions(lifecycle);
+            if (!isActive(lifecycle)) return;
             confirmedSaved = currentQuestions.some((savedQuestion) => questionMatchesGenerated(savedQuestion, question));
             if (confirmedSaved) {
               successfulIndices.push(index);
@@ -467,29 +721,32 @@ function InterviewDetailsPage() {
                 return Number.isFinite(order) ? Math.max(highest, Math.floor(order)) : highest;
               }, 0) + 1;
             }
-          } catch {
+          } catch (readError) {
+            if (!isActive(lifecycle) || (credentials && isTerminated(readError))) return;
             orderStateUncertain = true;
           }
+          if (credentials && !confirmedSaved) orderStateUncertain = true;
           if (!confirmedSaved) failedItems.push({ index, message });
-          if (saveError.status === 401 || /session is missing|authentication token/i.test(message)) {
+          if (!credentials && (saveError.status === 401 || /session is missing|authentication token/i.test(message))) {
             unauthorized = true;
           }
         }
       }
 
-      if (requestId !== saveRequestId.current) return;
+      if (!isActive(lifecycle)) return;
       let refreshError = "";
       if (successfulIndices.length > 0 || failedItems.length > 0) {
-        setQuestionsLoading(true);
-        setQuestionsError("");
-        try {
-          const refreshedQuestions = await getQuestions(interviewId);
-          if (requestId !== saveRequestId.current) return;
-          setQuestions(refreshedQuestions);
-
+        const refresh = await reloadQuestionList(lifecycle, {
+          fallback: "The saved questions could not be refreshed.",
+          redirectLegacy: false,
+        });
+        if (!isActive(lifecycle) || refresh.terminated) return;
+        refreshError = refresh.error || "";
+        const refreshedQuestions = refresh.result;
+        if (refreshedQuestions) {
           for (let position = failedItems.length - 1; position >= 0; position -= 1) {
             const failed = failedItems[position];
-            const attempted = generatedQuestions[failed.index];
+            const attempted = preview[failed.index];
             const alreadyPresent = attempted && refreshedQuestions.some((savedQuestion) =>
               questionMatchesGenerated(savedQuestion, attempted)
             );
@@ -498,15 +755,10 @@ function InterviewDetailsPage() {
               failedItems.splice(position, 1);
             }
           }
-        } catch (error) {
-          if (requestId !== saveRequestId.current) return;
-          refreshError = error.message || "The saved questions could not be refreshed.";
-          setQuestionsError(refreshError);
-        } finally {
-          if (requestId === saveRequestId.current) setQuestionsLoading(false);
         }
       }
 
+      if (!isActive(lifecycle)) return;
       if (successfulIndices.length > 0) {
         setSavedGeneratedQuestions((current) => new Set([...current, ...successfulIndices]));
         setSelectedGeneratedQuestions((current) => new Set(
@@ -533,7 +785,13 @@ function InterviewDetailsPage() {
         });
       }
     } catch (error) {
-      if (requestId !== saveRequestId.current) return;
+      if (!isActive(lifecycle)) return;
+      if (credentials) {
+        if (!isTerminated(error)) {
+          setSaveFeedback({ type: "error", message: safeErrorMessage(error, "Unable to load the question list before saving. Try again.") });
+        }
+        return;
+      }
       const message = error.message || "Saving failed. Check your connection and try again.";
       if (error.status === 401 || /session is missing|authentication token/i.test(message)) {
         setSaveFeedback({ type: "error", message: "Your session expired. Sign in again to save the selected questions." });
@@ -542,44 +800,10 @@ function InterviewDetailsPage() {
         setSaveFeedback({ type: "error", message: `Saving failed. No questions were saved. ${message}` });
       }
     } finally {
-      if (requestId === saveRequestId.current) {
+      if (isActive(lifecycle)) {
         saveInProgress.current = false;
         setSavingGeneratedQuestions(false);
       }
-    }
-  };
-
-  const handleStartOrResumeMockInterview = async () => {
-    if (sessionActionInProgress.current || !interviewId) return;
-    sessionActionInProgress.current = true;
-    setSessionActionLoading(true);
-    setSessionError("");
-
-    try {
-      let session;
-      try {
-        session = await findInProgressMockSession(interviewId);
-      } catch (lookupError) {
-        if (!(lookupError.status === 404 && /no in-progress session/i.test(lookupError.message))) throw lookupError;
-      }
-
-      if (!session) session = await createMockSession(interviewId);
-      if (!session?._id) throw new Error("The mock interview session could not be opened. Please try again.");
-
-      setInProgressSession(session.status === "in-progress" ? session : null);
-      navigate(`/mock-session/${encodeURIComponent(session._id)}`, {
-        state: { interviewId },
-      });
-    } catch (requestError) {
-      const message = requestError.message || "Unable to start the mock interview. Please try again.";
-      if (requestError.status === 401 || /session is missing|authentication|token|access denied|sign in/i.test(message)) {
-        navigate("/login", { replace: true });
-        return;
-      }
-      setSessionError(message);
-    } finally {
-      sessionActionInProgress.current = false;
-      setSessionActionLoading(false);
     }
   };
 
@@ -600,7 +824,7 @@ function InterviewDetailsPage() {
       {loading ? (
         <section className="flex min-h-64 items-center justify-center gap-3 rounded-2xl border theme-border theme-card-surface text-sm theme-text-secondary" role="status" aria-live="polite">
           <span className="h-5 w-5 animate-spin rounded-full border-2 theme-border-highlight theme-spinner-active" aria-hidden="true" />
-          Loading interview details…
+          Loading interview detailsÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦
         </section>
       ) : error ? (
         <section className="rounded-2xl border theme-border-error theme-error-surface p-6 text-center" role="alert">
@@ -625,26 +849,9 @@ function InterviewDetailsPage() {
       ) : null}
 
       {interview && (
-        <section className="flex flex-col gap-4 rounded-2xl border theme-border-highlight theme-card-surface p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:p-6" aria-labelledby="mock-interview-heading">
-          <div className="min-w-0">
-            <p className="mb-1 text-xs font-bold uppercase tracking-[0.14em] theme-text-accent">MOCK INTERVIEW</p>
-            <h3 id="mock-interview-heading" className="mb-1 font-[Manrope,sans-serif] text-lg font-bold theme-text-primary">Practice your interview</h3>
-            <p className="mb-0 text-sm leading-6 theme-text-secondary">Start a timed practice session with the questions saved for this interview.</p>
-          </div>
-          <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:min-w-52">
-            {inProgressSession ? (
-              <button type="button" onClick={handleStartOrResumeMockInterview} disabled={sessionActionLoading || sessionLookupLoading} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-70">
-                {sessionActionLoading ? <><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />Opening...</> : "Resume Mock Interview"}
-              </button>
-            ) : (
-              <button type="button" onClick={handleStartOrResumeMockInterview} disabled={sessionActionLoading || sessionLookupLoading || questionsLoading || questions.length === 0} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl theme-primary-button px-5 py-3 text-sm font-bold shadow-sm theme-shadow-green transition theme-hover-primary focus-visible:outline-none focus-visible:ring-2 theme-focus-ring disabled:cursor-wait disabled:opacity-70">
-                {sessionActionLoading || sessionLookupLoading ? <><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 theme-spinner-border theme-spinner-head" />{sessionActionLoading ? "Opening..." : "Checking sessions..."}</> : "Start Mock Interview"}
-              </button>
-            )}
-            {!questionsLoading && questions.length === 0 && <p className="mb-0 text-center text-xs theme-text-muted">Add at least one question to start.</p>}
-          </div>
-          {sessionError && <p className="mb-0 w-full rounded-xl border theme-border-error theme-error-surface px-4 py-3 text-sm theme-text-error sm:basis-full" role="alert">{sessionError}</p>}
-        </section>
+        credentials
+          ? <BoundMockInterviewLifecycle interviewId={interviewId} credentials={credentials} cancelOnUnmount questionsLoading={questionsLoading} hasQuestions={!questionsError && questions.length > 0} />
+          : <MockInterviewControls {...practice} questionsLoading={questionsLoading} hasQuestions={questions.length > 0} />
       )}
 
       <section className="relative overflow-hidden rounded-2xl border theme-border-highlight theme-card-surface p-5 shadow-sm sm:p-6" aria-labelledby="ai-generator-heading">
@@ -688,7 +895,7 @@ function InterviewDetailsPage() {
               >
                 {difficulties.map((difficulty) => <option key={difficulty} value={difficulty}>{difficulty}</option>)}
               </select>
-              <span className="mt-1.5 block text-xs theme-text-muted">Starts with this interview’s difficulty.</span>
+              <span className="mt-1.5 block text-xs theme-text-muted">Starts with this interviewÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢s difficulty.</span>
             </label>
 
             <div className="min-w-0 sm:col-span-2 xl:col-span-1">
@@ -869,6 +1076,12 @@ function InterviewDetailsPage() {
         ) : questionsError ? (
           <div className="m-5 rounded-xl border theme-border-error theme-error-surface p-5 text-center sm:m-6" role="alert">
             <p className="mb-0 text-sm theme-text-error">{questionsError}</p>
+            {credentials && (
+              <button type="button" className="mt-3 rounded-lg border theme-border px-3 py-2 text-sm" disabled={questionSaving || Boolean(deletingQuestionId) || savingGeneratedQuestions}
+                onClick={() => reloadQuestionList(lifecycleRef.current)}>
+                Reload questions
+              </button>
+            )}
           </div>
         ) : sortedQuestions.length === 0 ? (
           <div className="flex min-h-64 flex-col items-center justify-center px-5 py-10 text-center sm:min-h-72 sm:px-8">

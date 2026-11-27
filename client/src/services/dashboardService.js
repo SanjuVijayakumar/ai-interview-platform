@@ -1,6 +1,11 @@
 import { getAuthToken } from "./authService.js";
+import {
+  AuthenticatedRequestError,
+  authenticatedRequest,
+} from "./authenticatedRequest.js";
 
 const API_URL = "http://localhost:5000/api";
+const STATS_PATH = "/dashboard/stats";
 
 async function request(path) {
   const token = getAuthToken();
@@ -37,25 +42,37 @@ async function request(path) {
   return data;
 }
 
-export async function getDashboardStats() {
-  const stats = await request("/dashboard/stats");
+function isValidDashboardStats(stats) {
   const validCount = (value) => Number.isSafeInteger(value) && value >= 0;
-  const validAverage = stats && (
-    stats.averageScore === null ||
-    (typeof stats.averageScore === "number" &&
-      Number.isFinite(stats.averageScore) &&
-      stats.averageScore >= 0 &&
-      stats.averageScore <= 100)
+  return (
+    stats !== null &&
+    typeof stats === "object" &&
+    validCount(stats.totalInterviews) &&
+    validCount(stats.completedInterviews) &&
+    validCount(stats.pendingInterviews) &&
+    (stats.averageScore === null ||
+      (typeof stats.averageScore === "number" &&
+        Number.isFinite(stats.averageScore) &&
+        stats.averageScore >= 0 &&
+        stats.averageScore <= 100))
   );
+}
 
-  if (
-    !stats ||
-    typeof stats !== "object" ||
-    !validCount(stats.totalInterviews) ||
-    !validCount(stats.completedInterviews) ||
-    !validCount(stats.pendingInterviews) ||
-    !validAverage
-  ) {
+export async function getDashboardStats(options = {}) {
+  if (Object.hasOwn(options ?? {}, "capability")) {
+    const { data, status } = await authenticatedRequest(
+      options.capability,
+      `${API_URL}${STATS_PATH}`,
+      { method: "GET", signal: options.signal },
+    );
+    if (!isValidDashboardStats(data)) {
+      throw new AuthenticatedRequestError("malformed-response", status);
+    }
+    return data;
+  }
+
+  const stats = await request(STATS_PATH);
+  if (!isValidDashboardStats(stats)) {
     throw new Error("The dashboard statistics response was not in the expected format.");
   }
 

@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { completeMockSession, getMockSession, saveMockSessionAnswer } from "../services/mockSessionService.js";
+import { AuthenticatedRequestError } from "../services/authenticatedRequest.js";
+
+const EMPTY_QUESTIONS = Object.freeze([]);
 
 function formatElapsedTime(seconds) {
   const hours = Math.floor(seconds / 3600);
@@ -13,11 +16,40 @@ function getQuestionKey(question, index) {
   return String(question.question || index);
 }
 
-function isCompletedSessionError(error) {
-  return error?.status === 409 && error.message === "Completed sessions cannot be modified";
+function isCompletedSessionError(error, credentials) {
+  return error?.status === 409 && (credentials
+    ? error.data?.errorCode === "session_completed"
+    : error.message === "Completed sessions cannot be modified");
+}
+
+function canUseCredentials(credentials) {
+  if (!credentials) return true;
+  const { capability } = credentials;
+  try {
+    return capability !== null && typeof capability === "object" &&
+      typeof capability.fetch === "function" && capability.isCurrent() === true;
+  } catch {
+    return false;
+  }
+}
+
+function assertCurrentCredentials(credentials) {
+  if (!canUseCredentials(credentials)) throw new AuthenticatedRequestError("stale-session");
+}
+
+export function CapabilityBoundMockSessionPage({ capability }) {
+  const [credentials] = useState(() => ({ capability }));
+  if (!Object.is(credentials.capability, capability)) {
+    return <p role="alert">The authentication session for this mock interview changed.</p>;
+  }
+  return <MockSessionLifecycle credentials={credentials} />;
 }
 
 function MockSessionPage() {
+  return <MockSessionLifecycle credentials={null} />;
+}
+
+function MockSessionLifecycle({ credentials }) {
   const { sessionId } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
@@ -37,20 +69,102 @@ function MockSessionPage() {
   const completionLockRef = useRef(false);
   const mountedRef = useRef(false);
   const activeSessionIdRef = useRef(sessionId);
+  const routeLifecycleRef = useRef(null);
+
+  useLayoutEffect(() => {
+    routeLifecycleRef.current = Symbol();
+    return () => { routeLifecycleRef.current = null; };
+  }, [sessionId]);
 
   useEffect(() => {
     mountedRef.current = true;
+    const saveStates = saveStatesRef.current;
     return () => {
       mountedRef.current = false;
-      for (const state of saveStatesRef.current.values()) clearTimeout(state.timer);
+      for (const state of saveStates.values()) clearTimeout(state.timer);
     };
   }, []);
+
+  const markSessionCompleted = useCallback((completedSessionId, routeLifecycle) => {
+    const canUpdatePage = !credentials || (mountedRef.current && routeLifecycleRef.current === routeLifecycle);
+    for (const [key, state] of saveStatesRef.current.entries()) {
+      if (state.sessionId !== completedSessionId) continue;
+      if (credentials && state.routeLifecycle !== routeLifecycle) continue;
+      clearTimeout(state.timer);
+      state.timer = null;
+      state.completed = true;
+      if (canUpdatePage) setSaveStatuses((current) => ({ ...current, [key]: "completed" }));
+    }
+    if (!canUpdatePage || activeSessionIdRef.current !== completedSessionId) return;
+    setConfirmOpen(false);
+    setSession((current) => (
+      current && String(current._id) === completedSessionId
+        ? { ...current, status: "completed" }
+        : current
+    ));
+  }, [credentials]);
+
+  const flushAnswer = useCallback(async (key, questionId, state, { allowUnmount = false, keepalive = false, force = false } = {}) => {
+    if ((!mountedRef.current && !allowUnmount)) return;
+    const stateSessionId = state.sessionId;
+    if (state.completed) return;
+    if (state.promise) {
+      if (keepalive) state.keepaliveOnNext = true;
+      return state.promise;
+    }
+    if (state.version === state.savedVersion && !force) return;
+    assertCurrentCredentials(state.credentials);
+    const canUpdatePage = () => mountedRef.current && activeSessionIdRef.current === stateSessionId &&
+      (!state.credentials || routeLifecycleRef.current === state.routeLifecycle);
+    state.promise = (async () => {
+      let forceRequest = force;
+      while (!state.completed && (forceRequest || state.version !== state.savedVersion)) {
+        assertCurrentCredentials(state.credentials);
+        const requestVersion = state.version;
+        const requestText = state.text;
+        if (canUpdatePage()) setSaveStatuses((current) => ({ ...current, [key]: "saving" }));
+        try {
+          const requestKeepalive = keepalive || state.keepaliveOnNext;
+          state.keepaliveOnNext = false;
+          await saveMockSessionAnswer(stateSessionId, questionId, requestText, {
+            ...state.credentials,
+            keepalive: requestKeepalive,
+          });
+          assertCurrentCredentials(state.credentials);
+          if (state.completed) break;
+          state.savedVersion = requestVersion;
+          state.savedText = requestText;
+          forceRequest = false;
+        } catch (saveError) {
+          assertCurrentCredentials(state.credentials);
+          if (state.credentials && saveError.category === "stale-session") throw saveError;
+          if (isCompletedSessionError(saveError, state.credentials)) markSessionCompleted(stateSessionId, state.routeLifecycle);
+          if (state.text === state.savedText) {
+            state.savedVersion = state.version;
+            if (!state.completed && canUpdatePage()) setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
+            if (!allowUnmount && !state.credentials) return;
+          } else if (!state.completed && canUpdatePage()) {
+            setSaveStatuses((current) => ({ ...current, [key]: "failed" }));
+          }
+          throw saveError;
+        }
+      }
+      state.keepaliveOnNext = false;
+      if (!state.completed && canUpdatePage()) setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
+    })();
+    try {
+      await state.promise;
+    } finally {
+      state.promise = null;
+    }
+  }, [markSessionCompleted]);
 
   useEffect(() => {
     let active = true;
 
     async function loadSession() {
-      const previousSessionId = activeSessionIdRef.current;
+      const routeLifecycle = routeLifecycleRef.current;
+      const isActive = () => active && (!credentials || routeLifecycleRef.current === routeLifecycle);
       const previousEntries = [...saveStatesRef.current.entries()];
       for (const [, state] of previousEntries) {
         clearTimeout(state.timer);
@@ -73,35 +187,39 @@ function MockSessionPage() {
       // in the map until every save has been confirmed.
       try {
         for (const [key, state] of previousEntries) {
-          const stateSessionId = state.sessionId || previousSessionId;
-          if (stateSessionId === sessionId) continue;
+          if (state.sessionId === sessionId && (!credentials || state.routeLifecycle === routeLifecycle)) continue;
           if (state.version === state.savedVersion && !state.promise) continue;
+          const drainOptions = { allowUnmount: true, keepalive: true };
           try {
-            await flushAnswer(key, state.questionId, state, { allowUnmount: true });
+            await flushAnswer(key, state.questionId, state, drainOptions);
           } catch {
-            await flushAnswer(key, state.questionId, state, { allowUnmount: true, force: true });
+            await flushAnswer(key, state.questionId, state, { ...drainOptions, force: true });
           }
         }
       } catch {
-        if (!active) return;
+        if (!isActive()) return;
         setError("Could not save answers from the previous session. Retry to preserve them before opening this session.");
         setLoading(false);
         return;
       }
-      if (!active) return;
+      if (!isActive()) return;
       for (const [key, state] of previousEntries) {
         if (saveStatesRef.current.get(key) === state) saveStatesRef.current.delete(key);
       }
 
       try {
-        const result = await getMockSession(sessionId);
+        assertCurrentCredentials(credentials);
+        const result = credentials
+          ? await getMockSession(sessionId, credentials)
+          : await getMockSession(sessionId);
+        if (!isActive()) return;
+        assertCurrentCredentials(credentials);
         if (!result || !Array.isArray(result.answers)) {
           throw new Error("The session data was not in the expected format.");
         }
         if (result.answers.some((answer) => !answer || typeof answer.questionText !== "string")) {
           throw new Error("This session contains an invalid question snapshot.");
         }
-        if (!active) return;
 
         const orderedAnswers = [...result.answers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
         setSession({ ...result, answers: orderedAnswers });
@@ -110,21 +228,21 @@ function MockSessionPage() {
           typeof answer.answerText === "string" ? answer.answerText : "",
         ])));
       } catch (requestError) {
-        if (!active) return;
+        if (!isActive() || (credentials && requestError.category !== "stale-session" && !canUseCredentials(credentials))) return;
         const message = requestError.message || "Unable to load this mock interview session.";
-        if (requestError.status === 401 || /session is missing|authentication|token|access denied|sign in/i.test(message)) {
+        if (!credentials && (requestError.status === 401 || /session is missing|authentication|token|access denied|sign in/i.test(message))) {
           navigate("/login", { replace: true });
           return;
         }
         setError(message);
       } finally {
-        if (active) setLoading(false);
+        if (isActive()) setLoading(false);
       }
     }
 
     loadSession();
     return () => { active = false; };
-  }, [sessionId, retryCount, navigate]);
+  }, [sessionId, retryCount, navigate, credentials, flushAnswer]);
 
   useEffect(() => {
     if (!session?.startedAt) return undefined;
@@ -136,7 +254,7 @@ function MockSessionPage() {
     return () => clearInterval(interval);
   }, [session?.startedAt]);
 
-  const questions = session?.answers || [];
+  const questions = session?.answers || EMPTY_QUESTIONS;
   const currentQuestion = questions[currentIndex];
   const interviewId = location.state?.interviewId || session?.interview?._id || session?.interview;
   const backPath = interviewId ? `/interviews/${encodeURIComponent(interviewId)}` : "/interviews";
@@ -145,76 +263,13 @@ function MockSessionPage() {
     return count + (answers[getQuestionKey(question, index)]?.trim() ? 1 : 0);
   }, 0), [questions, answers]);
 
-  const markSessionCompleted = useCallback((completedSessionId) => {
-    for (const [key, state] of saveStatesRef.current.entries()) {
-      if ((state.sessionId || sessionId) !== completedSessionId) continue;
-      clearTimeout(state.timer);
-      state.timer = null;
-      state.completed = true;
-      setSaveStatuses((current) => ({ ...current, [key]: "completed" }));
-    }
-    if (activeSessionIdRef.current !== completedSessionId) return;
-    setConfirmOpen(false);
-    setSession((current) => (
-      current && String(current._id) === completedSessionId
-        ? { ...current, status: "completed" }
-        : current
-    ));
-  }, [sessionId]);
-
-  const flushAnswer = useCallback(async (key, questionId, state, { allowUnmount = false, keepalive = false, force = false } = {}) => {
-    if ((!mountedRef.current && !allowUnmount)) return;
-    const stateSessionId = state.sessionId || sessionId;
-    if (state.completed || (activeSessionIdRef.current === stateSessionId && session?.status === "completed")) return;
-    if (state.promise) {
-      if (keepalive) state.keepaliveOnNext = true;
-      return state.promise;
-    }
-    if (state.version === state.savedVersion && !force) return;
-    state.promise = (async () => {
-      let forceRequest = force;
-      while (!state.completed && (forceRequest || state.version !== state.savedVersion)) {
-        const requestVersion = state.version;
-        const requestText = state.text;
-        if (mountedRef.current && activeSessionIdRef.current === stateSessionId) setSaveStatuses((current) => ({ ...current, [key]: "saving" }));
-        try {
-          const requestKeepalive = keepalive || state.keepaliveOnNext;
-          state.keepaliveOnNext = false;
-          await saveMockSessionAnswer(stateSessionId, questionId, requestText, { keepalive: requestKeepalive });
-          if (state.completed) break;
-          state.savedVersion = requestVersion;
-          state.savedText = requestText;
-          forceRequest = false;
-        } catch (saveError) {
-          if (isCompletedSessionError(saveError)) markSessionCompleted(stateSessionId);
-          if (state.text === state.savedText) {
-            state.savedVersion = state.version;
-            if (!state.completed && mountedRef.current && activeSessionIdRef.current === stateSessionId) setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
-            if (!allowUnmount) return;
-          } else if (!state.completed && mountedRef.current && activeSessionIdRef.current === stateSessionId) {
-            setSaveStatuses((current) => ({ ...current, [key]: "failed" }));
-          }
-          throw saveError;
-        }
-      }
-      state.keepaliveOnNext = false;
-      if (!state.completed && mountedRef.current && activeSessionIdRef.current === stateSessionId) setSaveStatuses((current) => ({ ...current, [key]: "saved" }));
-    })();
-    try {
-      await state.promise;
-    } finally {
-      state.promise = null;
-    }
-  }, [markSessionCompleted, session?.status, sessionId]);
-
   const flushPendingOnExit = useCallback(() => {
     if (exitFlushPromiseRef.current) return exitFlushPromiseRef.current;
     const pendingEntries = [...saveStatesRef.current.entries()];
     const answerFlushes = pendingEntries.map(async ([key, state]) => {
-      const stateSessionId = state.sessionId || sessionId;
       clearTimeout(state.timer);
       state.timer = null;
-      if (state.completed || (activeSessionIdRef.current === stateSessionId && session?.status === "completed")) return;
+      if (state.completed) return;
       if (state.version === state.savedVersion && !state.promise) return;
       try {
         await flushAnswer(key, state.questionId, state, { allowUnmount: true, keepalive: true });
@@ -231,7 +286,7 @@ function MockSessionPage() {
       exitFlushPromiseRef.current = null;
     });
     return exitFlushPromiseRef.current;
-  }, [flushAnswer, session?.status, sessionId]);
+  }, [flushAnswer]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -247,13 +302,25 @@ function MockSessionPage() {
   }, [flushPendingOnExit]);
 
   const updateCurrentAnswer = (value) => {
-    if (!currentQuestion || completionLockRef.current || session?.status === "completed") return;
+    if (!currentQuestion || completionLockRef.current || session?.status === "completed" || !canUseCredentials(credentials)) return;
     const key = getQuestionKey(currentQuestion, currentIndex);
     let state = saveStatesRef.current.get(key);
     if (state?.completed) return;
     setAnswers((current) => ({ ...current, [key]: value }));
     if (!state) {
-      state = { sessionId, questionId: String(currentQuestion.question), version: 0, savedVersion: 0, savedText: currentQuestion.answerText || "", text: currentQuestion.answerText || "", timer: null, promise: null, keepaliveOnNext: false };
+      state = {
+        sessionId,
+        questionId: String(currentQuestion.question),
+        credentials,
+        routeLifecycle: routeLifecycleRef.current,
+        version: 0,
+        savedVersion: 0,
+        savedText: currentQuestion.answerText || "",
+        text: currentQuestion.answerText || "",
+        timer: null,
+        promise: null,
+        keepaliveOnNext: false,
+      };
       saveStatesRef.current.set(key, state);
     }
     state.text = value;
@@ -282,8 +349,11 @@ function MockSessionPage() {
   };
 
   const completeInterview = async () => {
-    if (completionLockRef.current || !session || session.status === "completed") return;
+    if (completionLockRef.current || !session || session.status === "completed" || !canUseCredentials(credentials)) return;
     const completingSessionId = sessionId;
+    const routeLifecycle = routeLifecycleRef.current;
+    const isCurrent = () => activeSessionIdRef.current === completingSessionId &&
+      (!credentials || (routeLifecycleRef.current === routeLifecycle && canUseCredentials(credentials)));
     completionLockRef.current = true;
     setCompleting(true);
     setCompletionError("");
@@ -295,22 +365,27 @@ function MockSessionPage() {
         const questionIndex = questions.findIndex((item, index) => getQuestionKey(item, index) === key);
         if (questionIndex < 0) continue;
         await flushAnswer(key, String(questions[questionIndex].question), state);
-        if (activeSessionIdRef.current !== completingSessionId) return;
+        if (!isCurrent()) return;
+        if (credentials && (state.completed || state.version !== state.savedVersion)) {
+          throw new Error("Could not save answers before completing the interview.");
+        }
       }
-      if (activeSessionIdRef.current !== completingSessionId) return;
-      const completedSession = await completeMockSession(completingSessionId);
-      if (activeSessionIdRef.current !== completingSessionId) return;
+      if (!isCurrent()) return;
+      const completedSession = credentials
+        ? await completeMockSession(completingSessionId, credentials)
+        : await completeMockSession(completingSessionId);
+      if (!isCurrent()) return;
       for (const state of saveStatesRef.current.values()) clearTimeout(state.timer);
       saveStatesRef.current.clear();
       setSession((current) => ({ ...current, ...completedSession, status: "completed" }));
       setConfirmOpen(false);
       navigate(`/results/${encodeURIComponent(completingSessionId)}`, { replace: true });
     } catch (requestError) {
-      if (activeSessionIdRef.current !== completingSessionId) return;
+      if (!isCurrent()) return;
       completionLockRef.current = false;
       setCompletionError(requestError.message || "Could not complete the interview. Your answers remain available; please retry.");
     } finally {
-      if (activeSessionIdRef.current === completingSessionId) setCompleting(false);
+      if (isCurrent()) setCompleting(false);
     }
   };
 
